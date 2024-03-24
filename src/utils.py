@@ -1,3 +1,4 @@
+from typing import List, Tuple
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -26,7 +27,7 @@ def normalize_adj(adj, symmetric=True, power=-0.5, diagonal=False):
     else:
         return tf.einsum("...ij, ...jk -> ...ik", d_inv, adj)
     
-    
+
 def node_degree(adj, symmetric=True):
     if symmetric:
         return tf.linalg.diag(tf.reduce_sum(adj, -1))
@@ -126,85 +127,17 @@ def zero_inflated_lognormal(logits=None, p=None, mu=None, sigma=None):
 
 
 def get_product_subgraph(G: nx.MultiGraph, prod_key: str) -> nx.Graph:
-    edges = [(i, j, k) for i, j, k in G.edges if k == prod_key]
+    edges = [(i, j, k) for i, j, k in list(G.edges) if k == prod_key]
     G_sub = G.edge_subgraph(edges).copy()
     return G_sub
 
-
-def from_data_sparse_to_ntx(data_sp):
-    """
-    Parameters:
-        data_sp: tf.SparseTensor of shape RxNxN
-    """
-    edges = data_sp.indices
-    r = edges[:, 0]
-    i = edges[:, 1]
-    j = edges[:, 2]
-    idx2prod = idx_to_product(r)
-    idx2country_i = idx_to_countries(i)
-    idx2country_j = idx_to_countries(j)
-    data = pd.DataFrame(
-        {
-            "ReporterISO3": idx2country_i,
-            "PartnerISO3": idx2country_j,
-            "ProductCode2": idx2prod,
-        }
-    )
-    G = nx.from_pandas_edgelist(
-        df=data[["ReporterISO3", "PartnerISO3", "TradeValue", "ProductCode2"]],
-        source="ReporterISO3",
-        target="PartnerISO3",
-        edge_attr=["TradeValue"],
-        edge_key="ProductCode2",
-        create_using=nx.MultiDiGraph(),
-    )
-    return G
-
-
-def from_edgelist_to_pd(edgelist, values):
-    df_convert = pd.read_excel(COUNTRIES_CODES_PATH)
-    edgelist = np.asarray(edgelist)
-    for i in range(len(edgelist)):
-        c1 = df_convert[df_convert["Country Code"] == edgelist[i, 0]][
-            "ISO3-digit Alpha"
-        ]
-        c2 = df_convert[df_convert["Country Code"] == edgelist[i, 1]][
-            "ISO3-digit Alpha"
-        ]
-        edgelist[i, 0] = c1
-        edgelist[i, 1] = c2
-
-    for i in range(len(edgelist)):
-        edgelist[i, 0] = df_convert[edgelist[i, 0]]
-        edgelist[i, 1] = df_convert[edgelist[i, 1]]
-
-    df = pd.DataFrame(
-        {
-            "code1": edgelist[:, 0],
-            "code2": edgelist[:1],
-            "prod": edgelist[:, 2],
-            "tv": values,
-        }
-    )
-    G = nx.from_pandas_edgelist(
-        df=df,
-        source="code1",
-        target="code2",
-        edge_attr=["tv"],
-        edge_key="prod",
-        create_using=nx.MultiDiGraph(),
-    )
-
-    return G
-
-
 def select_edges(
-        edge_list: [(int, int, str)],
-        values: [int],
-        years: [int],
-        code1: [str],
-        code2: [str],
-        products: [str],
+        edge_list: List[Tuple[int, int, str]],
+        values: List[int],
+        years: List[int],
+        code1: List[str],
+        code2: List[str],
+        products: List[str],
 ):
     subgraph_edgelist = []
     subgraph_values = []
@@ -218,83 +151,6 @@ def select_edges(
             subgraph_values.append(tv)
     return subgraph_edgelist, subgraph_values
 
-
-def idx_to_product(data=None, reporting_code="SITC1"):
-    if os.path.exists(
-            os.path.join(COMTRADE_DATASET, f"idx_to_prod_{reporting_code}.pkl")
-    ):
-        with open(
-                os.path.join(COMTRADE_DATASET, f"idx_to_prod_{reporting_code}.pkl"), "rb"
-        ) as file:
-            idx_to_prod = pkl.load(file)
-    else:
-        prod_to_idx = products_to_idx(reporting_code)
-        idx_to_prod = {}
-        for k in prod_to_idx.keys():
-            idx_to_prod[prod_to_idx[k]] = k
-        with open(
-                os.path.join(COMTRADE_DATASET, f"idx_to_prod_{reporting_code}.pkl"), "wb"
-        ) as file:
-            pkl.dump(idx_to_prod, file)
-    idxs = []
-    if data is not None:
-        for i in data:
-            idxs.append(idx_to_prod[i])
-        return idxs
-    else:
-        return idx_to_prod
-
-
-def data_countries_to_idx(data, dict, data_path=None, conversion_dict_path=None):
-    if data_path is not None:
-        with open(data_path, "rb") as file:
-            data = pkl.load(file)
-    else:
-        data = data
-
-    if conversion_dict_path is not None:
-        with open(conversion_dict_path, "rb") as file:
-            idx_conversion = pkl.load(file)
-    else:
-        idx_conversion = dict
-
-    no_key = []
-    counter = tqdm.tqdm(total=len(data), desc="Converting countries codes")
-    for i, e in enumerate(data):
-        try:
-            c1 = idx_conversion[e[1]]
-            c2 = idx_conversion[e[2]]
-            data[i] = (e[0], c1, c2, *e[3:])
-        except:
-            print(f"no key for {e}")
-            no_key.append(i)
-        counter.update(1)
-
-    for i in no_key:
-        data.pop(i)
-    return data
-
-
-def idx_to_countries(data=None):
-    if os.path.exists(os.path.join(COMTRADE_DATASET, "idx_to_countries.pkl")):
-        with open(os.path.join(COMTRADE_DATASET, "idx_to_countries.pkl"), "rb") as file:
-            idx_to_country = pkl.load(file)
-    else:
-        country_to_idx = countries_to_idx()
-        idx_to_country = {}
-        for k in country_to_idx.keys():
-            idx_to_country[country_to_idx[k]] = k
-            with open(
-                    os.path.join(COMTRADE_DATASET, "idx_to_countries.pkl"), "wb"
-            ) as file:
-                pkl.dump(idx_to_country, file)
-    converted = []
-    if data is not None:
-        for i in data:
-            converted.append(idx_to_country[i])
-        return converted
-    else:
-        return idx_to_country
 
 
 

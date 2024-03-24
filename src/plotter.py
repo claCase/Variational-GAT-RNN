@@ -1,3 +1,4 @@
+from typing import List
 import tensorflow as tf
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -7,18 +8,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 from src.utils import get_product_subgraph
 import os
+import pandas as pd 
 
 
 def draw_subgraph(
         G: nx.MultiDiGraph,
-        prod_keys: [str],
-        nodes: [str] = None,
+        prod_keys: List[str],
+        nodes: List[str] = None,
         log_scale=True,
         normalize=True,
-        quantile=0.10,
+        bottom_quantile=0.9,
+        top_quantile=1,
+        attribute_key=None,
 ):
+    assert bottom_quantile < top_quantile
+
     with open(os.path.join(os.getcwd(), "Data", "iso2_long_lat.pkl"), "rb") as file:
         lat_long = pkl.load(file)
+    cc = pd.read_csv("./data/country_codes_V202301.csv")
     radius = np.linspace(-0.1, -0.5, len(prod_keys))
     col_idx = np.arange(0, len(prod_keys))
     colors = plt.get_cmap("Set1")(col_idx)
@@ -28,42 +35,53 @@ def draw_subgraph(
         remove_nodes = []
         for name in G_sub.nodes:
             if nodes is not None:
-                print(name)
                 if name not in nodes:
                     remove_nodes.append(name)
                     continue
             try:
-                i_pos = lat_long[name]
-                G_sub.nodes[name]["pos"] = i_pos
+                i_pos = None
+                if type(name) is int:
+                    print(f"name: {cc[cc.country_code == name]['iso_2digit_alpha'].values[0]} code: {name}")
+                    i_pos = lat_long[cc[cc.country_code == name]["iso_2digit_alpha"].values[0]]
+                else:
+                    print(f"name: {name}")
+                    i_pos = lat_long[name]
+                if i_pos is None:
+                    remove_nodes.append(name)
+                else:
+                    G_sub.nodes[name]["pos"] = i_pos
             except Exception as e:
                 print(e)
                 remove_nodes.append(name)
 
         for name in remove_nodes:
             G_sub.remove_node(name)
-
         width = [G_sub.get_edge_data(i, j, k)["v"] for i, j, k in G_sub.edges]
         width = np.asarray(width)
-
         if log_scale:
             width = np.log(width)
         if normalize:
             width = (width - width.min()) / (width.max() - width.min()) + 0.5
-        if quantile:
-            q = np.quantile(a=width, q=quantile)
+        
+        b_q = np.quantile(a=width, q=bottom_quantile)
+        t_q = np.quantile(a=width, q=top_quantile)
+        
+        if attribute_key is not None:
+            try:
+                weights = nx.get_node_attributes(G_sub, attribute_key)
+            except Exception as e:
+                raise e
+        else:
+            weights = 10
+        long_lat = np.asarray(list(nx.get_node_attributes(G_sub, "pos").values()))
+        plt.scatter(long_lat[:, 0], long_lat[:, 1], color="b", s=weights)
 
         for j, edge in enumerate(G_sub.edges):
-            if quantile and (width[j] < q):
+            if not (b_q < width[j] < t_q):
                 continue
-            if G_sub.nodes[0]["attr"]:
-                weights = []
-                for node in G_sub.nodes:
-                    weights.append(G_sub[node]["attr"])
-            else:
-                weights = 10
+            
             xy1 = G_sub.nodes[edge[0]]["pos"]
             xy2 = G_sub.nodes[edge[1]]["pos"]
-            plt.scatter([xy1[0], xy2[0]], [xy1[1], xy2[1]], color="b", s=weights)
             ax.annotate(
                 "",
                 xy=xy2,
