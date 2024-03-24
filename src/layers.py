@@ -24,12 +24,14 @@ class VGRNNCell(l.Layer):
     def __init__(
             self,
             nodes,
+            outputs=1,
             dropout=0.1,
             recurrent_dropout=0.1,
             attn_heads=4,
             channels=10,
             concat_heads=False,
             add_bias=True,
+            diagonal=True,
             activation="elu",
             regularizer=None,
             return_attn_coef=False,
@@ -62,19 +64,19 @@ class VGRNNCell(l.Layer):
         self.sigma_enc = GATv2Layer(
             attn_heads=4, channels=channels, activation=activation
         )
-        self.decoder = BatchBilinearDecoderDense(activation="linear")
+        self.decoder = BatchMultiBilinearDecoderDense(activation="linear", diagonal=diagonal, depth=outputs)
         self.state_size = tf.TensorShape((nodes, channels))
         self.return_attn_coef = return_attn_coef
 
         if return_attn_coef:
             self.output_size = [
-                tf.TensorShape((attn_heads, nodes, nodes)),
+                tf.TensorShape((attn_heads, nodes, nodes)),  # attention heads
                 tf.TensorShape((nodes, channels)),  # prior mu
                 tf.TensorShape((nodes, channels)),  # prior sigma
                 tf.TensorShape((nodes, channels)),  # posterior mu
                 tf.TensorShape((nodes, channels)),  # posterior sigma
                 tf.TensorShape((nodes, channels)),  # hidden state
-                tf.TensorShape((nodes, nodes)),  # adj dec
+                tf.TensorShape((nodes, nodes, outputs)),  # adj dec
             ]
         else:
             self.output_size = [
@@ -83,7 +85,7 @@ class VGRNNCell(l.Layer):
                 tf.TensorShape((nodes, channels)),  # posterior mu
                 tf.TensorShape((nodes, channels)),  # posterior sigma
                 tf.TensorShape((nodes, channels)),  # hidden state
-                tf.TensorShape((nodes, nodes)),  # adj dec
+                tf.TensorShape((nodes, nodes, outputs)),  # adj dec
             ]
 
     def call(self, inputs, states, *args, **kwargs):
@@ -96,9 +98,9 @@ class VGRNNCell(l.Layer):
         phi_x_t = self.phi_x(x)
         enc_t = self.enc((tf.concat([phi_x_t, h[0]], axis=-1), a))
         post_t_mu = self.mu_enc([enc_t, a])
-        post_t_sigma = self.sigma_enc([enc_t, a])
-        post_t_sigma = 1e-3 + tf.math.softplus(0.05 * post_t_sigma)
-        z_distr_post = MultivariateNormalDiag(post_t_mu, post_t_sigma)
+        post_t_ss = self.sigma_enc([enc_t, a])
+        post_t_ss = 1e-3 + tf.math.softplus(0.05 * post_t_ss)
+        z_distr_post = MultivariateNormalDiag(post_t_mu, post_t_ss)
         z_sample = tf.squeeze(z_distr_post.sample(1))
         phi_z_t = self.phi_z(z_sample)
         adj_dec = self.decoder(z_sample)
@@ -110,7 +112,7 @@ class VGRNNCell(l.Layer):
                 mu_prior,
                 sigma_prior,
                 post_t_mu,
-                post_t_sigma,
+                post_t_ss,
                 h_prime,
                 adj_dec,
             ], h_prime
@@ -119,7 +121,7 @@ class VGRNNCell(l.Layer):
                 mu_prior,
                 sigma_prior,
                 post_t_mu,
-                post_t_sigma,
+                post_t_ss,
                 h_prime,
                 adj_dec,
             ], h_prime
@@ -617,22 +619,32 @@ class BatchBilinearDecoderDense(l.Layer):
     outputs: A of shape batch x N x N
     """
 
-    def __init__(self, activation="relu", qr=False, regularizer="l2", zero_diag=True):
-        super(BatchBilinearDecoderDense, self).__init__()
+    def __init__(self, activation="relu", qr=False, regularizer="l2", diagonal=False, zero_diag=True, **kwargs):
+        super(BatchBilinearDecoderDense, self).__init__(**kwargs)
         self.activation = activation
         self.regularizer = regularizer
         self.qr = qr
         self.zero_diag = zero_diag
+        self.diagonal = diagonal
 
     def build(self, input_shape):
         x = input_shape
-        self.R = self.add_weight(
-            shape=(x[-1], x[-1]),
-            initializer="glorot_normal",
-            regularizer=self.regularizer,
-            name="bilinear_matrix",
-        )
-        self.diag = tf.constant(1 - tf.linalg.diag([tf.ones(x[-2])]))
+        if self.diagonal:
+            self.R = self.add_weight(
+                shape=(x[-1],),
+                initializer="glorot_normal",
+                regularizer=self.regularizer,
+                name="bilinear_matrix",
+            )
+            self.R = tf.linalg.diag(self.R)
+        else:
+            self.R = self.add_weight(
+                shape=(x[-1], x[-1]),
+                initializer="glorot_normal",
+                regularizer=self.regularizer,
+                name="bilinear_matrix",
+            )
+        self.diag = tf.constant(1. - tf.linalg.diag([tf.ones(x[-2])]))
 
     def call(self, inputs, *args, **kwargs):
         x = inputs
@@ -660,22 +672,33 @@ class BatchMultiBilinearDecoderDense(l.Layer):
     outputs: A of shape batch x N x N
     """
 
-    def __init__(self, activation="relu", depth=2, regularizer="l2", zero_diag=True):
-        super(BatchMultiBilinearDecoderDense, self).__init__()
+    def __init__(self, activation="relu", depth=2, regularizer="l2", diagonal=False, zero_diag=True, **kwargs):
+        super(BatchMultiBilinearDecoderDense, self).__init__(**kwargs)
         self.activation = activation
         self.regularizer = regularizer
         self.depth = depth
         self.zero_diag = zero_diag
+        self.diagonal = diagonal
 
     def build(self, input_shape):
         x = input_shape
-        self.R = self.add_weight(
-            shape=(x[-1], x[-1], self.depth),
-            initializer="glorot_normal",
-            regularizer=self.regularizer,
-            name="bilinear_matrix",
-        )
-        self.diag = tf.constant(1 - tf.linalg.diag([tf.ones(x[-2])]))[..., None]
+        if self.diagonal:
+            self.R = self.add_weight(
+                shape=(self.depth, x[-1],),
+                initializer="glorot_normal",
+                regularizer=self.regularizer,
+                name="bilinear_matrix",
+            )
+            self.R = tf.linalg.diag(self.R)
+            self.R = tf.transpose(self.R, perm=(1,2,0))
+        else:
+            self.R = self.add_weight(
+                shape=(x[-1], x[-1], self.depth),
+                initializer="glorot_normal",
+                regularizer=self.regularizer,
+                name="bilinear_matrix",
+            )
+        self.diag = tf.constant(1. - tf.linalg.diag([tf.ones(x[-2])]))[..., None]
 
     def call(self, inputs, *args, **kwargs):
         x = inputs
