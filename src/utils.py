@@ -6,6 +6,7 @@ import tensorflow_probability.python.distributions as tfd
 import networkx as nx
 import os
 import geopy
+import pickle as pkl
 
 
 def normalize_adj(adj, symmetric=True, power=-0.5, diagonal=False):
@@ -26,7 +27,7 @@ def normalize_adj(adj, symmetric=True, power=-0.5, diagonal=False):
         return tf.einsum("...ij, ...jk, ...ko -> ...io", d_inv, adj, d_inv)
     else:
         return tf.einsum("...ij, ...jk -> ...ik", d_inv, adj)
-    
+
 
 def node_degree(adj, symmetric=True):
     if symmetric:
@@ -104,7 +105,9 @@ def filter_value(matrix: np.array, value: float, axis=-1):
 
 
 def positive_variance(var):
-    return tf.math.maximum(tf.nn.softplus(var), tf.math.sqrt(tf.keras.backend.epsilon()))
+    return tf.math.maximum(
+        tf.nn.softplus(var), tf.math.sqrt(tf.keras.backend.epsilon())
+    )
 
 
 def zero_inflated_lognormal(logits=None, p=None, mu=None, sigma=None):
@@ -122,22 +125,63 @@ def zero_inflated_lognormal(logits=None, p=None, mu=None, sigma=None):
         components=[
             tfd.Deterministic(loc=tf.zeros_like(p)),
             tfd.LogNormal(loc=mu, scale=sigma),
-        ])
+        ],
+    )
     return a
 
 
-def get_product_subgraph(G: nx.MultiGraph, prod_key: str) -> nx.Graph:
-    edges = [(i, j, k) for i, j, k in list(G.edges) if k == prod_key]
+def get_product_subgraph(G: nx.MultiGraph, prod_keys: List[str]) -> nx.Graph:
+    edges = [(i, j, k) for i, j, k in list(G.edges) if k in prod_keys]
     G_sub = G.edge_subgraph(edges).copy()
     return G_sub
 
+
+def country_code_converter(countries, iso="ISO2"):
+    if type(countries[0]) is int:
+        from_iso = "country_code"
+    elif type(countries[0]) is str:
+        if len(countries[0]) == 2:
+            from_iso = "iso_2digit_alpha"
+        elif len(countries[0]) == 3:
+            from_iso = "iso_3digit_alpha"
+        else:
+            raise ValueError(
+                "Country code is of type string but is not of length 2 or 3"
+            )
+    else:
+        raise ValueError("Country code is not of type string or int")
+
+    if iso == "ISO2":
+        to_iso = "iso_2digit_alpha"
+    elif iso == "ISO3":
+        to_iso = "iso_3digit_alpha"
+    elif iso == "CODE":
+        to_iso = "country_code"
+
+    if from_iso == to_iso:
+        return countries
+    else:
+        cc = pd.read_csv("./data/country_codes_V202301.csv")
+        return [cc[cc[from_iso] == name][to_iso].values[0] for name in countries]
+
+
+def country_long_lat(countries):
+    with open(os.path.join(os.getcwd(), "Data", "iso2_long_lat.pkl"), "rb") as file:
+        lat_long = pkl.load(file)
+
+    countries = country_code_converter(countries, "ISO2")
+    cc = pd.read_csv("./data/country_codes_V202301.csv")
+
+    return [lat_long[name] for name in countries]
+
+
 def select_edges(
-        edge_list: List[Tuple[int, int, str]],
-        values: List[int],
-        years: List[int],
-        code1: List[str],
-        code2: List[str],
-        products: List[str],
+    edge_list: List[Tuple[int, int, str]],
+    values: List[int],
+    years: List[int],
+    code1: List[str],
+    code2: List[str],
+    products: List[str],
 ):
     subgraph_edgelist = []
     subgraph_values = []
@@ -150,8 +194,6 @@ def select_edges(
             subgraph_edgelist.append((y, c1, c2, p))
             subgraph_values.append(tv)
     return subgraph_edgelist, subgraph_values
-
-
 
 
 """
