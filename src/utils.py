@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Union
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -136,7 +136,7 @@ def get_product_subgraph(G: nx.MultiGraph, prod_keys: List[str]) -> nx.Graph:
     return G_sub
 
 
-def country_code_converter(countries, iso="ISO2"):
+def country_code_converter(countries:List[Union[str, int]], iso="iso2"):
     if type(countries[0]) is int:
         from_iso = "country_code"
     elif type(countries[0]) is str:
@@ -144,20 +144,25 @@ def country_code_converter(countries, iso="ISO2"):
             from_iso = "iso_2digit_alpha"
         elif len(countries[0]) == 3:
             from_iso = "iso_3digit_alpha"
+        elif len(countries[0]) > 3:
+            from_iso = "country_name_abbreviation"
         else:
             raise ValueError(
-                "Country code is of type string but is not of length 2 or 3"
+                "country_code_converter: Country code is of type string but is not of length 2 or 3"
             )
     else:
-        raise ValueError("Country code is not of type string or int")
+        raise ValueError("country_code_converter: Country code is not of type string or int")
 
-    if iso == "ISO2":
+    if iso == "iso2":
         to_iso = "iso_2digit_alpha"
-    elif iso == "ISO3":
+    elif iso == "iso3":
         to_iso = "iso_3digit_alpha"
-    elif iso == "CODE":
+    elif iso == "code":
         to_iso = "country_code"
-
+    elif iso == "name":
+        to_iso = "country_name_abbreviation"
+    else:
+        raise ValueError("country_code_converter: iso must be (in iso2, iso3, code, name)")
     if from_iso == to_iso:
         return countries
     else:
@@ -169,11 +174,50 @@ def country_long_lat(countries):
     with open(os.path.join(os.getcwd(), "Data", "iso2_long_lat.pkl"), "rb") as file:
         lat_long = pkl.load(file)
 
-    countries = country_code_converter(countries, "ISO2")
+    countries = country_code_converter(countries, "iso2")
     cc = pd.read_csv("./data/country_codes_V202301.csv")
 
     return [lat_long[name] for name in countries]
 
+
+# https://community.plotly.com/t/scattermapbox-plot-curved-lines-like-scattergeo/43665
+def point_sphere(lon, lat):
+    #associate the cartesian coords (x, y, z) to a point on the  globe of given lon and lat
+    #lon longitude
+    #lat latitude
+    lon = lon*np.pi/180
+    lat = lat*np.pi/180
+    x = np.cos(lon) * np.cos(lat) 
+    y = np.sin(lon) * np.cos(lat) 
+    z = np.sin(lat) 
+    return np.array([x, y, z])
+
+
+def slerp(A=[100, 45], B=[-50, -25], dir=-1, n=100):
+    #Spherical "linear" interpolation
+    """
+    A=[lonA, latA] lon lat given in degrees; lon in  (-180, 180], lat in ([-90, 90])
+    B=[lonB, latB]
+    returns n points on the great circle of the globe that passes through the  points A, B
+    #represented by lon and lat
+    #if dir=1 it returns the shortest path; for dir=-1 the complement of the shortest path
+    """
+    As = point_sphere(A[0], A[1])
+    Bs = point_sphere(B[0], B[1])
+    alpha = np.arccos(np.dot(As,Bs)) if dir==1 else  2*np.pi-np.arccos(np.dot(As,Bs))
+    if abs(alpha) < 1e-6 or abs(alpha-2*np.pi)<1e-6:
+        return A
+    else:
+        t = np.linspace(0, 1, n)
+        P = np.sin((1 - t)*alpha) 
+        Q = np.sin(t*alpha)
+        #pts records the cartesian coordinates of the points on the chosen path
+        pts =  np.array([a*As + b*Bs for (a, b) in zip(P,Q)])/np.sin(alpha)
+        #convert cartesian coords to lons and lats to be recognized by go.Scattergeo
+        lons = 180*np.arctan2(pts[:, 1], pts[:, 0])/np.pi
+        lats = 180*np.arctan(pts[:, 2]/np.sqrt(pts[:, 0]**2+pts[:,1]**2))/np.pi
+        return lons, lats
+    
 
 def select_edges(
     edge_list: List[Tuple[int, int, str]],

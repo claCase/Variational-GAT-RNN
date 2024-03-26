@@ -203,7 +203,7 @@ class BaciDataLoader:
         )
         return spt
 
-    def to_networkx(self) -> Dict[int : nx.MultidiGraph]:
+    def to_networkx(self):
         return {
             t: nx.from_pandas_edgelist(
                 df=self.raw_data[self.raw_data.t == t],
