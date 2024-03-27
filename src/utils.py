@@ -137,6 +137,8 @@ def get_product_subgraph(G: nx.MultiGraph, prod_keys: List[str]) -> nx.Graph:
 
 
 def country_code_converter(countries:List[Union[str, int]], iso="iso2"):
+    if len(countries) == 0:
+        return countries
     if type(countries[0]) is int:
         from_iso = "country_code"
     elif type(countries[0]) is str:
