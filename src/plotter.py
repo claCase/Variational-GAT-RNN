@@ -172,11 +172,10 @@ def draw_subgraph(
         df_nodes["lat"] = [G_sub.nodes[node]["pos"][1] for node in nodes]
         draw_nodes = set()
         fig = go.Figure()
-
+        group_legend = {key:True for key in prod_keys}
         for j, edge in enumerate(G_sub.edges):
             prod = edge[2]
-            width = G_sub.edges[edge]["v"]
-
+            width = G_sub.edges[edge]["v"] 
             if log_scale:
                 width = np.log(width + min_prod[prod])
 
@@ -215,14 +214,26 @@ def draw_subgraph(
                         locationmode="USA-states",
                         lon=[xy1[0], xy2[0]],
                         lat=[xy1[1], xy2[1]],
-                        mode="lines",
+                        mode="lines+markers",
                         line=dict(
                             width=1,
                             color=px.colors.qualitative.Light24[color_idx[prod]],
                         ),
+                        marker=dict(
+                            symbol="triangle-right",
+                            size=width*2,
+                            color=px.colors.qualitative.Light24[color_idx[prod]],
+                            angle=radius[prod],
+                        ),
                         opacity=normed_width,
+                        hoverinfo="skip", 
+                        legendgroup=prod,
+                        legendgrouptitle={"text":prod},
+                        name=prod,
+                        showlegend=group_legend[prod]
                     )
                 )
+            group_legend[prod] = False
 
         if not use_mapbox:
             draw_df_nodes = df_nodes[df_nodes["code"].isin(draw_nodes)]
@@ -233,26 +244,27 @@ def draw_subgraph(
                     lon=draw_df_nodes["long"],
                     lat=draw_df_nodes["lat"],
                     hoverinfo="text",
-                    text=draw_df_nodes["name"],
+                    hovertext=draw_df_nodes["name"],
                     mode="markers",
                     marker=dict(
-                        size=3,
+                        size=4,
                         color="Blue",
                         # line=dict(width=3, color="rgba(68, 68, 68, 0)"),
                     ),
+                    showlegend=False,
                 )
             )
             fig.update_layout(
                 width=1000, 
-                height=1000,
+                height=700,
                 autosize=True,
-                # title_text=f"Trade for products {prod_keys} for countries between {bottom_quantile} and {top_quantile} quantiles",
-                showlegend=False,
+                showlegend=True,
+                legend=dict(traceorder='reversed'),
                 geo=dict(
                     scope="world",
-                    # projection_type="azimuthal equal area",
                     projection_type="natural earth",                    
                 ),
+                margin={"r": 10, "t": 10, "l": 10, "b": 0},
             )
             fig.update_geos(
                 resolution=50,
