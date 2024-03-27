@@ -1,6 +1,6 @@
 # %%
-from typing import List, Dict
-import teneto
+from typing import List, Dict, Type, Self
+#import teneto
 import numpy as np
 import tensorflow as tf
 import pandas as pd
@@ -10,6 +10,7 @@ import pickle as pkl
 from tqdm.contrib import tzip
 import tqdm
 from src.CONSTANTS import NA_VALUE, EXCLUDE_COUNTRIES
+from src.utils import country_code_converter
 
 
 class BaciDataLoader:
@@ -32,6 +33,18 @@ class BaciDataLoader:
         self.year2idx_mapping = dict()
         self.country_codes = pd.read_csv("./data/country_codes_V202301.csv")
 
+    @property
+    def countries(self, iso='code'):
+        return country_code_converter(list(self.country2idx_mapping.keys()), iso) 
+    
+    @property
+    def products(self,):
+        return list(self.product2idx_mapping.keys())
+
+    @property
+    def years(self,):
+        return list(self.year2idx_mapping.keys())
+    
     def from_csv_path(
         self,
         path,
@@ -74,41 +87,23 @@ class BaciDataLoader:
                 for i in range(end - start):
                     self.year2idx_mapping[start + i + 1] = i
                     self.idx2year_mapping[i] = start + i + 1
-            products = complete_data["k"].unique()
+            products = set(complete_data["k"].unique())
             countries_i = complete_data["i"]
             countries_i = set(countries_i.unique())
             countries_j = complete_data["j"]
             countries_j = set(countries_j.unique())
             countries = countries_i.union(countries_j)
-            products.sort()
 
             print("Building Products Mapping...")
             self.product2idx_mapping, self.idx2product_mapping = self.build_mapping(
                 products
             )
-
-            if save_path is not None:
-                if not os.path.exists(save_path):
-                    print(f"Creating path {save_path}")
-                    os.makedirs(save_path)
-                with open(os.path.join(save_path, "products_to_idx.pkl"), "wb") as file:
-                    pkl.dump(baci_prod2idx, file)
-                with open(os.path.join(save_path, "idx_to_products.pkl"), "wb") as file:
-                    pkl.dump(baci_prod2idx, file)
-
             print("Building Countries Mapping...")
             self.country2idx_mapping, self.idx2country_mapping = self.build_mapping(
                 countries
             )
             if save_path is not None:
-                with open(
-                    os.path.join(save_path, "countries_to_idx.pkl"), "wb"
-                ) as file:
-                    pkl.dump(baci_country2idx, file)
-                with open(
-                    os.path.join(save_path, "idx_to_countries.pkl"), "wb"
-                ) as file:
-                    pkl.dump(baci_idx2country, file)
+                self.save(save_path)
         except Exception as e:
             raise e
 
@@ -132,7 +127,7 @@ class BaciDataLoader:
         # Average null values group value, if it's still na then substitute with 0.
         mean_na = raw_reindexed.loc[namidx].groupby(["t", "i", "k"]).mean().fillna(0.0)
         # Assign average to grouped dataFrame
-        raw_reindexed.loc[namidx, column] = mean_na.loc[namidx]
+        raw_reindexed.loc[namidx] = mean_na.loc[namidx]
         # Assign average to original data
         self.raw_data.iloc[naidx, col_idx] = raw_reindexed.reset_index()
         # Clean garbage
@@ -140,6 +135,23 @@ class BaciDataLoader:
         del mean_na
         del naidx
         del namidx
+
+    def join(self, other:Self):
+        products = list(set(self.products).union(other.products))
+        countries = list(set(self.countries).union(other.countries))
+        print("Building Products Mapping...")
+        self.product2idx_mapping, self.idx2product_mapping = self.build_mapping(
+            products
+        )
+        print("Building Countries Mapping...")
+        self.country2idx_mapping, self.idx2country_mapping = self.build_mapping(
+            countries
+        )
+        self.raw_data = pd.concat([self.raw_data, other.raw_data], ignore_index=True)
+        years = list(set(self.year2idx_mapping.keys()).union(other.year2idx_mapping.keys()))
+        years.sort()
+        self.year2idx_mapping, self.idx2year_mapping = self.build_mapping(years)
+        
 
     def reduce_product_detail(self, detail: int):
         print("Reducing Products...")
@@ -154,6 +166,7 @@ class BaciDataLoader:
         self.raw_data = self.raw_data.groupby(["t", "i", "j", "kk"]).sum().reset_index()
         self.raw_data.rename(columns={"kk": "k"}, inplace=True)
         products = self.raw_data["k"].unique()
+        print("Re-building Products mapping")
         self.product2idx_mapping, self.idx2product_mapping = self.build_mapping(
             products
         )
@@ -201,6 +214,7 @@ class BaciDataLoader:
             values=np.concatenate([price, quantity], 0),
             dense_shape=(max_t + 1, max_cty + 1, max_cty + 1, max_prod + 1, 2),
         )
+        spt = tf.sparse.reorder(spt)
         return spt
 
     def to_networkx(self):
@@ -223,24 +237,27 @@ class BaciDataLoader:
         if not os.path.exists(path):
             print(f"making path: {path}")
             os.makedirs(path)
-        with open(os.path.join(path, "year2idx_mapping.pkl"), "wb") as file:
-            pkl.dump(self.year2idx_mapping, file)
+        try:
 
-        with open(os.path.join(path, "country2idx_mapping.pkl"), "wb") as file:
-            pkl.dump(self.country2idx_mapping, file)
+            with open(os.path.join(path, "year2idx_mapping.pkl"), "wb") as file:
+                pkl.dump(self.year2idx_mapping, file)
 
-        with open(os.path.join(path, "product2idx_mapping.pkl"), "wb") as file:
-            pkl.dump(self.product2idx_mapping, file)
+            with open(os.path.join(path, "country2idx_mapping.pkl"), "wb") as file:
+                pkl.dump(self.country2idx_mapping, file)
 
-        with open(os.path.join(path, "idx2year_mapping.pkl"), "wb") as file:
-            pkl.dump(self.idx2year_mapping, file)
+            with open(os.path.join(path, "product2idx_mapping.pkl"), "wb") as file:
+                pkl.dump(self.product2idx_mapping, file)
 
-        with open(os.path.join(path, "idx2country_mapping.pkl"), "wb") as file:
-            pkl.dump(self.idx2country_mapping, file)
+            with open(os.path.join(path, "idx2year_mapping.pkl"), "wb") as file:
+                pkl.dump(self.idx2year_mapping, file)
 
-        with open(os.path.join(path, "idx2product_mapping.pkl"), "wb") as file:
-            pkl.dump(self.idx2product_mapping, file)
+            with open(os.path.join(path, "idx2country_mapping.pkl"), "wb") as file:
+                pkl.dump(self.idx2country_mapping, file)
 
+            with open(os.path.join(path, "idx2product_mapping.pkl"), "wb") as file:
+                pkl.dump(self.idx2product_mapping, file)
+        except Exception as e:
+            raise e 
         self.raw_data.to_csv(os.path.join(path, "raw_data.csv"))
 
     def load(self, path):
@@ -248,23 +265,24 @@ class BaciDataLoader:
             print(f"Loading Data from {path}")
         else:
             raise ValueError(f"Path {path} does not exist")
+        try:
+            with open(os.path.join(path, "year2idx_mapping.pkl"), "rb") as file:
+                self.year2idx_mapping = pkl.load(file)
 
-        with open(os.path.join(path, "year2idx_mapping.pkl"), "rb") as file:
-            self.year2idx_mapping = pkl.load(file)
+            with open(os.path.join(path, "country2idx_mapping.pkl"), "rb") as file:
+                self.country2idx_mapping = pkl.load(file)
 
-        with open(os.path.join(path, "country2idx_mapping.pkl"), "rb") as file:
-            self.country2idx_mapping = pkl.load(file)
+            with open(os.path.join(path, "product2idx_mapping.pkl"), "rb") as file:
+                self.product2idx_mapping = pkl.load(file)
 
-        with open(os.path.join(path, "product2idx_mapping.pkl"), "rb") as file:
-            self.product2idx_mapping = pkl.load(file)
+            with open(os.path.join(path, "idx2year_mapping.pkl"), "rb") as file:
+                self.idx2year_mapping = pkl.load(file)
 
-        with open(os.path.join(path, "idx2year_mapping.pkl"), "rb") as file:
-            self.idx2year_mapping = pkl.load(file)
+            with open(os.path.join(path, "idx2country_mapping.pkl"), "rb") as file:
+                self.idx2country_mapping = pkl.load(file)
 
-        with open(os.path.join(path, "idx2country_mapping.pkl"), "rb") as file:
-            self.idx2country_mapping = pkl.load(file)
-
-        with open(os.path.join(path, "idx2product_mapping.pkl"), "rb") as file:
-            self.idx2product_mapping = pkl.load(file)
-
+            with open(os.path.join(path, "idx2product_mapping.pkl"), "rb") as file:
+                self.idx2product_mapping = pkl.load(file)
+        except Exception as e:
+            raise e 
         self.raw_data = pd.read_csv(os.path.join(path, "raw_data.csv"))
