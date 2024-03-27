@@ -101,7 +101,7 @@ class VGRNNCell(l.Layer):
         post_t_ss = self.sigma_enc([enc_t, a])
         post_t_ss = 1e-3 + tf.math.softplus(0.05 * post_t_ss)
         z_distr_post = MultivariateNormalDiag(post_t_mu, post_t_ss)
-        z_sample = tf.squeeze(z_distr_post.sample(1))
+        z_sample = tf.squeeze(z_distr_post.sample(1), 0)
         phi_z_t = self.phi_z(z_sample)
         adj_dec = self.decoder(z_sample)
 

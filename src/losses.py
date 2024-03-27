@@ -1,3 +1,4 @@
+from typing import Type
 import tensorflow as tf
 from .utils import normalize_adj, node_degree, positive_variance
 from tensorflow_probability.python.distributions import LogNormal, HalfNormal
@@ -35,12 +36,12 @@ def min_cut(A, S, normalize=True):
     return mc + ort
 
 
-def zero_inflated_likelihood(labels: tf.Tensor,
-                             logits: tf.Tensor,
+def zero_inflated_likelihood(labels: Type[tf.Tensor],
+                             logits: Type[tf.Tensor],
                              sum_axis=(-2, -1),
                              pos_weight=1.,
                              smooth=0.0,
-                             distribution="lognormal") -> tf.Tensor:
+                             distribution="lognormal") -> Type[tf.Tensor]:
     """
     Computes the zero inflated lognormal loss.
     Arguments:

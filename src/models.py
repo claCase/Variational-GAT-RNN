@@ -546,24 +546,36 @@ class VRNNGATWeighted(m.Model):
 
     @tf.function
     def likelihood(self, true_adj, pred_adj):
+        """Computes Likelihood of temporal batched adjeciency matrix
+
+        Args:
+            true_adj (tf.Tensor): (B, T, N, N)
+            pred_adj (tf.Tensor): (B, T, N, N)
+
+        Returns:
+            tf.Tensor: (B,T)  
+        """
+        B = tf.cast(tf.shape(true_adj)[0], tf.float32)
+        T = tf.cast(true_adj.shape[1], tf.float32)
         true_adj = tf.expand_dims(true_adj, -1)
         pos = tf.cast(true_adj > 0, tf.float32)
         pos_sum = tf.reduce_sum(pos)
-        posw = (tf.cast(tf.reduce_prod(true_adj.shape[:2]), pred_adj.dtype) * float(
-            self.nodes) ** 2 - pos_sum) / pos_sum
-        norm = self.nodes ** 2 / ((tf.cast(tf.reduce_prod(true_adj.shape[:2]),
-                                           pred_adj.dtype) * tf.cast(self.nodes, pred_adj.dtype) ** 2
-                                   - pos_sum) * 2)
+        tot = T*B*float(self.nodes) ** 2
+        neg = (tot - pos_sum) # negative edges
+        posw = neg / pos_sum
+        norm = tot / neg
         loss = zero_inflated_likelihood(labels=true_adj, logits=pred_adj, sum_axis=(-1, -2), pos_weight=posw)
-        loss = norm * loss
+        loss = 1/2  * norm * loss
         return loss
 
     @tf.function
     def kl_hidden(self, mu_prior, sigma_prior, mu_posterior, sigma_posterior):
-        mu_prior = tf.reshape(mu_prior, (*mu_prior.shape[:2], -1))
-        sigma_prior = tf.reshape(sigma_prior, (*sigma_prior.shape[:2], -1))
-        mu_posterior = tf.reshape(mu_posterior, (*mu_posterior.shape[:2], -1))
-        sigma_posterior = tf.reshape(sigma_posterior, (*sigma_posterior.shape[:2], -1))
+        B = tf.shape(mu_prior)[0]
+        T = tf.shape(mu_prior)[1]
+        mu_prior = tf.reshape(mu_prior, (B, T, -1))
+        sigma_prior = tf.reshape(sigma_prior, (B, T, -1))
+        mu_posterior = tf.reshape(mu_posterior, (B, T, -1))
+        sigma_posterior = tf.reshape(sigma_posterior, (B, T, -1))
         distr_prior = MultivariateNormalDiag(mu_prior, sigma_prior)
         distr_posterior = MultivariateNormalDiag(mu_posterior, sigma_posterior)
         return kl_divergence(distr_posterior, distr_prior)
@@ -582,7 +594,7 @@ class VRNNGATWeighted(m.Model):
             else:
                 mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
             nll = -self.likelihood(y, adj_dec)
-            kl = -self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
+            kl = self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
             loss = tf.reduce_mean(nll + kl)
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
