@@ -7,6 +7,8 @@ import networkx as nx
 import os
 import geopy
 import pickle as pkl
+import tensorflow as tf
+import logging 
 
 
 def normalize_adj(adj, symmetric=True, power=-0.5, diagonal=False):
@@ -136,7 +138,7 @@ def get_product_subgraph(G: nx.MultiGraph, prod_keys: List[str]) -> nx.Graph:
     return G_sub
 
 
-def country_code_converter(countries:List[Union[str, int]], iso="iso2"):
+def country_code_converter(countries: List[Union[str, int]], iso="iso2"):
     if len(countries) == 0:
         return countries
     if type(countries[0]) is int:
@@ -153,7 +155,9 @@ def country_code_converter(countries:List[Union[str, int]], iso="iso2"):
                 "country_code_converter: Country code is of type string but is not of length 2 or 3"
             )
     else:
-        raise ValueError("country_code_converter: Country code is not of type string or int")
+        raise ValueError(
+            "country_code_converter: Country code is not of type string or int"
+        )
 
     if iso == "iso2":
         to_iso = "iso_2digit_alpha"
@@ -164,13 +168,21 @@ def country_code_converter(countries:List[Union[str, int]], iso="iso2"):
     elif iso == "name":
         to_iso = "country_name_abbreviation"
     else:
-        raise ValueError("country_code_converter: iso must be (in iso2, iso3, code, name)")
+        raise ValueError(
+            "country_code_converter: iso must be (in iso2, iso3, code, name)"
+        )
     if from_iso == to_iso:
         return countries
     else:
         cc = pd.read_csv("./data/country_codes_V202301.csv")
-        return [cc[cc[from_iso] == name][to_iso].values[0] for name in countries]
-
+        converted = []
+        for name in countries:
+            try:
+                converted.append(cc[cc[from_iso] == name][to_iso].values[0])
+            except Exception as e:
+                logging.warning(f"Country {name} cannot be converted")
+                converted.append(None)
+        return list(set(converted))
 
 def country_long_lat(countries):
     with open(os.path.join(os.getcwd(), "Data", "iso2_long_lat.pkl"), "rb") as file:
