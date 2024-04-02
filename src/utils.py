@@ -196,19 +196,19 @@ def country_long_lat(countries):
 
 # https://community.plotly.com/t/scattermapbox-plot-curved-lines-like-scattergeo/43665
 def point_sphere(lon, lat):
-    #associate the cartesian coords (x, y, z) to a point on the  globe of given lon and lat
-    #lon longitude
-    #lat latitude
-    lon = lon*np.pi/180
-    lat = lat*np.pi/180
-    x = np.cos(lon) * np.cos(lat) 
-    y = np.sin(lon) * np.cos(lat) 
-    z = np.sin(lat) 
+    # associate the cartesian coords (x, y, z) to a point on the  globe of given lon and lat
+    # lon longitude
+    # lat latitude
+    lon = lon * np.pi / 180
+    lat = lat * np.pi / 180
+    x = np.cos(lon) * np.cos(lat)
+    y = np.sin(lon) * np.cos(lat)
+    z = np.sin(lat)
     return np.array([x, y, z])
 
 
 def slerp(A=[100, 45], B=[-50, -25], dir=-1, n=100):
-    #Spherical "linear" interpolation
+    # Spherical "linear" interpolation
     """
     A=[lonA, latA] lon lat given in degrees; lon in  (-180, 180], lat in ([-90, 90])
     B=[lonB, latB]
@@ -218,20 +218,26 @@ def slerp(A=[100, 45], B=[-50, -25], dir=-1, n=100):
     """
     As = point_sphere(A[0], A[1])
     Bs = point_sphere(B[0], B[1])
-    alpha = np.arccos(np.dot(As,Bs)) if dir==1 else  2*np.pi-np.arccos(np.dot(As,Bs))
-    if abs(alpha) < 1e-6 or abs(alpha-2*np.pi)<1e-6:
+    alpha = (
+        np.arccos(np.dot(As, Bs)) if dir == 1 else 2 * np.pi - np.arccos(np.dot(As, Bs))
+    )
+    if abs(alpha) < 1e-6 or abs(alpha - 2 * np.pi) < 1e-6:
         return A
     else:
         t = np.linspace(0, 1, n)
-        P = np.sin((1 - t)*alpha) 
-        Q = np.sin(t*alpha)
-        #pts records the cartesian coordinates of the points on the chosen path
-        pts =  np.array([a*As + b*Bs for (a, b) in zip(P,Q)])/np.sin(alpha)
-        #convert cartesian coords to lons and lats to be recognized by go.Scattergeo
-        lons = 180*np.arctan2(pts[:, 1], pts[:, 0])/np.pi
-        lats = 180*np.arctan(pts[:, 2]/np.sqrt(pts[:, 0]**2+pts[:,1]**2))/np.pi
+        P = np.sin((1 - t) * alpha)
+        Q = np.sin(t * alpha)
+        # pts records the cartesian coordinates of the points on the chosen path
+        pts = np.array([a * As + b * Bs for (a, b) in zip(P, Q)]) / np.sin(alpha)
+        # convert cartesian coords to lons and lats to be recognized by go.Scattergeo
+        lons = 180 * np.arctan2(pts[:, 1], pts[:, 0]) / np.pi
+        lats = (
+            180
+            * np.arctan(pts[:, 2] / np.sqrt(pts[:, 0] ** 2 + pts[:, 1] ** 2))
+            / np.pi
+        )
         return lons, lats
-    
+
 
 def select_edges(
     edge_list: List[Tuple[int, int, str]],
@@ -253,6 +259,40 @@ def select_edges(
             subgraph_values.append(tv)
     return subgraph_edgelist, subgraph_values
 
+
+class KlScheduler(tf.keras.callbacks.Callback):
+    def __init__(self, rate, schedule_type="sigmoid"):
+        super().__init__()
+        self.rate = rate
+        self.schedule_type = schedule_type
+
+    def linear(self, i):
+        max_epoch = self.params["epochs"]
+        return i / max_epoch * self.rate
+
+    def sigmoid(self, i):
+        max_epoch = self.params["epochs"]
+        return tf.nn.sigmoid(i / max_epoch * self.rate) * 2 - 0.49
+
+    def get_schedule(self, type):
+        if type == "linear":
+            return self.linear
+        elif type == "sigmoid":
+            return self.sigmoid
+        else:
+            raise NotImplementedError(
+                f"Type of schedule {type} is not supported, choose from 'linear', 'sigmoid'"
+            )
+
+    def on_epoch_end(self, epoch, logs=None):
+        epoch = tf.cast(epoch, tf.float32)
+        if hasattr(self.model, "kl_weight"):
+            self.model.kl_weight = self.get_schedule(self.schedule_type)(epoch)
+        else:
+            raise AttributeError(f"Model does not have kl_weight attribute")
+
+    def on_train_end(self, logs=None):
+        self.model.kl_weight = 1e-4
 
 """
 import cartopy.crs as ccrs
