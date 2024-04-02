@@ -1,6 +1,7 @@
 # %%
-from typing import List, Dict, Type, Self
-#import teneto
+from typing import List, Dict, Type, Self, Union, Type, Optional
+
+# import teneto
 import numpy as np
 import tensorflow as tf
 import pandas as pd
@@ -34,17 +35,21 @@ class BaciDataLoader:
         self.country_codes = pd.read_csv("./data/country_codes_V202301.csv")
 
     @property
-    def countries(self, iso='code'):
-        return country_code_converter(list(self.country2idx_mapping.keys()), iso) 
-    
+    def countries(self, iso="code"):
+        return country_code_converter(list(self.country2idx_mapping.keys()), iso)
+
     @property
-    def products(self,):
+    def products(
+        self,
+    ):
         return list(self.product2idx_mapping.keys())
 
     @property
-    def years(self,):
+    def years(
+        self,
+    ):
         return list(self.year2idx_mapping.keys())
-    
+
     def from_csv_path(
         self,
         path,
@@ -117,6 +122,31 @@ class BaciDataLoader:
             idx2values[v] = k
         return values2idx, idx2values
 
+    def rebuild_mappings(self, products=False, countries=False, years=False):
+        if products is False and countries is False and years is False:
+            products, countries, years = [True] * 3
+        if products:
+            print("Re-Building Products Mapping...")
+            products_ = list(self.raw_data.k.unique())
+            self.product2idx_mapping, self.idx2product_mapping = self.build_mapping(
+                products_
+            )
+        if countries:
+            print("Re-Building Countries Mapping...")
+            countries_ = list(set(self.raw_data.i).union(self.raw_data.j.unique()))
+            self.country2idx_mapping, self.idx2country_mapping = self.build_mapping(
+                countries_
+            )
+        if years:
+            print("Re-Building years")
+            years_ = list(self.raw_data.t.unique())
+            years_.sort()
+            self.year2idx_mapping, self.idx2year_mapping = self.build_mapping(years_)
+
+    # TODO
+    def __getitem__(self, item):
+        raise NotImplementedError
+
     def fill_missing_with_avg(self, column: str = "q"):
         col_idx = self.raw_data.columns.get_loc(column)
         # Check for null values
@@ -136,7 +166,7 @@ class BaciDataLoader:
         del naidx
         del namidx
 
-    def join(self, other:Self):
+    def join(self, other: Self):
         products = list(set(self.products).union(other.products))
         countries = list(set(self.countries).union(other.countries))
         print("Building Products Mapping...")
@@ -148,12 +178,13 @@ class BaciDataLoader:
             countries
         )
         self.raw_data = pd.concat([self.raw_data, other.raw_data], ignore_index=True)
-        years = list(set(self.year2idx_mapping.keys()).union(other.year2idx_mapping.keys()))
+        years = list(
+            set(self.year2idx_mapping.keys()).union(other.year2idx_mapping.keys())
+        )
         years.sort()
         self.year2idx_mapping, self.idx2year_mapping = self.build_mapping(years)
-        
 
-    def reduce_product_detail(self, detail: int):
+    def reduce_product_detail(self, detail: int, inplace=True):
         print("Reducing Products...")
         if detail > 6:
             raise ValueError("Detail cannot be greater than 6")
@@ -161,34 +192,95 @@ class BaciDataLoader:
             print("Skipping reducing dataset")
             return
         reduced = self.raw_data["k"].astype(str).str[:detail]
-        self.raw_data["kk"] = reduced
-        self.raw_data.drop("k", axis=1, inplace=True)
-        self.raw_data = self.raw_data.groupby(["t", "i", "j", "kk"]).sum().reset_index()
-        self.raw_data.rename(columns={"kk": "k"}, inplace=True)
-        products = self.raw_data["k"].unique()
-        print("Re-building Products mapping")
-        self.product2idx_mapping, self.idx2product_mapping = self.build_mapping(
-            products
-        )
+        if inplace:
+            self.raw_data["kk"] = reduced
+            self.raw_data.drop("k", axis=1, inplace=True)
+            self.raw_data = (
+                self.raw_data.groupby(["t", "i", "j", "kk"]).sum().reset_index()
+            )
+            self.raw_data.rename(columns={"kk": "k"}, inplace=True)
+            products = self.raw_data["k"].unique()
+            print("Re-building Products mapping")
+            self.product2idx_mapping, self.idx2product_mapping = self.build_mapping(
+                products
+            )
+        else:
+            data = self.raw_data.drop("k", axis=1, inplace=False).copy()
+            data = data.groupby(["t", "i", "j", "kk"]).sum().reset_index()
+            data.rename(columns={"kk": "k"}, inplace=True)
+            baci = BaciDataLoader()
+            baci.raw_data = data
+            baci.rebuild_mappings()
+            return baci
 
-    def remove_countries(self, countries: List[str] = None):
+    def remove_countries(self, countries: List[str] = None, inplace=True):
         print("Removing Countries...")
         if countries is None:
             countries = EXCLUDE_COUNTRIES
-        remaining = ~self.country_codes["country_name_abbreviation"].isin(countries)
+        countries = country_code_converter(countries, "code")
+        remaining = ~self.country_codes["country_code"].isin(countries)
         remaining_countries = self.country_codes[remaining]["country_code"]
-        self.raw_data = self.raw_data[
-            self.raw_data["i"].isin(remaining_countries)
-            & self.raw_data["j"].isin(remaining_countries)
-        ].reset_index(drop=True)
-        left_countries = set(
-            [*self.raw_data["i"].to_list(), *self.raw_data["j"].to_list()]
-        )
-        self.country2idx_mapping, self.idx2country_mapping = self.build_mapping(
-            left_countries
-        )
+        if inplace:
+            self.raw_data = self.raw_data[
+                self.raw_data["i"].isin(remaining_countries)
+                & self.raw_data["j"].isin(remaining_countries)
+            ].reset_index(drop=True)
+            left_countries = set(
+                [*self.raw_data["i"].to_list(), *self.raw_data["j"].to_list()]
+            )
+            print("Re-building Countries mapping")
+            self.country2idx_mapping, self.idx2country_mapping = self.build_mapping(
+                left_countries
+            )
+        else:
+            data = self.raw_data.copy()
+            data = data[
+                data["i"].isin(remaining_countries)
+                & data["j"].isin(remaining_countries)
+            ].reset_index(drop=True)
+            baci = BaciDataLoader()
+            baci.raw_data = data
+            baci.rebuild_mappings()
+            return baci
 
-    def to_tf_sparse(self) -> tf.SparseTensor:
+    def select_countries(self, countries: List[Union[str, int]], inplace=True):
+        print("Selecting Countries...")
+        countries = country_code_converter(countries, "code")
+        for c in countries:
+            if c not in self.countries:
+                raise ValueError(f"Country {c} is not in countries {self.countries}")
+        remaining = self.raw_data["i"].isin(countries) & self.raw_data["j"].isin(
+            countries
+        )
+        if inplace is True:
+            remaining_countries = self.raw_data[remaining]
+            self.raw_data = remaining_countries
+            self.rebuild_mappings()
+        else:
+            data = self.raw_data.copy()
+            data = data[remaining]
+            baci_loader = BaciDataLoader()
+            baci_loader.raw_data = data
+            baci_loader.rebuild_mappings()
+            return baci_loader
+
+    def select_products(self, products: List[str], inplace=True):
+        print("Selecting Products...")
+        for p in products:
+            if not p in self.products:
+                raise ValueError(f"Product {p} is not in products {self.products}")
+        remaining = self.raw_data["k"].isin(products)
+        remaining_products = self.raw_data[remaining]
+        if inplace is True:
+            self.raw_data = remaining_products
+            self.rebuild_mappings()
+        else:
+            baci_loader = BaciDataLoader()
+            baci_loader.raw_data = remaining_products
+            baci_loader.rebuild_mappings()
+            return baci_loader
+
+    def to_tf_sparse(self) -> Type[tf.SparseTensor]:
         print("Building Sparse Index List")
         raw_indices = self.raw_data[["t", "i", "j", "k"]]
         max_prod = max(self.idx2product_mapping.keys())
@@ -218,8 +310,9 @@ class BaciDataLoader:
         return spt
 
     def to_networkx(self):
-        return {
-            t: nx.from_pandas_edgelist(
+        graphs = {}
+        for t in tqdm.tgrange(self.years):
+            graphs[t] = nx.from_pandas_edgelist(
                 df=self.raw_data[self.raw_data.t == t],
                 source="i",
                 target="j",
@@ -227,8 +320,7 @@ class BaciDataLoader:
                 edge_key="k",
                 create_using=nx.MultiDiGraph(),
             )
-            for t in self.raw_data.t.unique()
-        }
+        return graphs
 
     def to_rugged(self):
         raise NotImplemented
@@ -257,7 +349,7 @@ class BaciDataLoader:
             with open(os.path.join(path, "idx2product_mapping.pkl"), "wb") as file:
                 pkl.dump(self.idx2product_mapping, file)
         except Exception as e:
-            raise e 
+            raise e
         self.raw_data.to_csv(os.path.join(path, "raw_data.csv"))
 
     def load(self, path):
@@ -284,5 +376,5 @@ class BaciDataLoader:
             with open(os.path.join(path, "idx2product_mapping.pkl"), "rb") as file:
                 self.idx2product_mapping = pkl.load(file)
         except Exception as e:
-            raise e 
+            raise e
         self.raw_data = pd.read_csv(os.path.join(path, "raw_data.csv"))
