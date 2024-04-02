@@ -38,7 +38,7 @@ def min_cut(A, S, normalize=True):
 
 def zero_inflated_likelihood(labels: Type[tf.Tensor],
                              logits: Type[tf.Tensor],
-                             sum_axis=(-2, -1),
+                             mean_axis=(-2, -1),
                              pos_weight=1.,
                              smooth=0.0,
                              distribution="lognormal") -> Type[tf.Tensor]:
@@ -47,7 +47,7 @@ def zero_inflated_likelihood(labels: Type[tf.Tensor],
     Arguments:
     :param labels: True targets, tensor of shape [batch_size, 1].
     :param logits: Logits of output layer, tensor of shape [batch_size, 3] -> prob, mean, var
-    :param sum_axis: Axis of indipendent joint distribution
+    :param mean_axis: Axis of indipendent joint distribution
     :param pos_weight: scalar indicating positive class re-weighting
     :param smooth: label smoothing scalar parameter
     :param distribution: Either Lognormal or Halfnormal
@@ -70,18 +70,18 @@ def zero_inflated_likelihood(labels: Type[tf.Tensor],
         y_true=positive, y_pred=positive_logits, from_logits=False, axis=-1, label_smoothing=smooth)
     positive0 = tf.squeeze(positive, -1)
     classification_loss = classification_loss * (1 - positive0) + positive0 * classification_loss * pos_weight
-    classification_loss = -tf.reduce_sum(classification_loss, axis=sum_axis)
+    classification_loss = tf.reduce_mean(classification_loss, axis=mean_axis)
     loc = logits[..., 1:2]
     # loc = tf.math.maximum(tf.nn.relu(loc), tf.math.sqrt(K.epsilon()))
     safe_labels = positive * labels + (
             1 - positive) * tf.ones_like(labels)
     if distribution == "lognormal":
         scale = positive_variance(logits[..., 2:])
-        regression_loss = tf.reduce_sum(
+        regression_loss = -tf.reduce_mean(
             tf.squeeze(positive * LogNormal(loc=loc, scale=scale).log_prob(safe_labels), -1),
-            axis=sum_axis)
+            axis=mean_axis)
     else:
-        regression_loss = tf.reduce_sum(tf.squeeze(
+        regression_loss = -tf.reduce_mean(tf.squeeze(
             positive * HalfNormal(scale=loc).log_prob(safe_labels), -1),
-            axis=sum_axis)
+            axis=mean_axis)
     return 0.5 * classification_loss + 0.5 * regression_loss
