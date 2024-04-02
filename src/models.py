@@ -14,6 +14,7 @@ from .layers import (
 )
 from .losses import custom_mse, zero_inflated_likelihood
 from tensorflow_probability.python.distributions import MultivariateNormalDiag
+from .utils import zero_inflated_lognormal
 
 tf.keras.utils.get_custom_objects().clear()
 
@@ -481,6 +482,7 @@ class VRNNGATWeighted(m.Model):
             layer_norm=False,
             initializer="glorot_normal",
             gatv2=True,
+            single_gat=True,
             return_sequences=True,
             return_state=True,
             go_backwards=False,
@@ -507,6 +509,7 @@ class VRNNGATWeighted(m.Model):
         self.layer_norm = layer_norm
         self.initializer = initializer
         self.gatv2 = gatv2
+        self.single_gat=single_gat
         self.return_sequences = return_sequences
         self.return_state = return_state
         self.go_backwards = go_backwards
@@ -516,6 +519,7 @@ class VRNNGATWeighted(m.Model):
         self.n_outputs = 2 if distribution == "halfnormal" else 3
         self.gnn_post_mu = GATv2Layer(self.attn_heads, self.channels)
         self.gnn_post_sigma = GATv2Layer(self.attn_heads, self.channels)
+        self.kl_weight = 1e-4 
 
         rnn_cell = VGRNNCell(
             nodes=self.nodes,
@@ -531,7 +535,8 @@ class VRNNGATWeighted(m.Model):
             layer_norm=self.layer_norm,
             initializer=self.initializer,
             gatv2=self.gatv2,
-            outputs=self.n_outputs
+            single_gat=self.single_gat,
+            outputs=self.n_outputs, 
         )
 
         self.rnn = l.RNN(
@@ -545,7 +550,7 @@ class VRNNGATWeighted(m.Model):
         )
 
     @tf.function
-    def likelihood(self, true_adj, pred_adj):
+    def nlikelihood(self, true_adj, pred_adj, weighted=False):
         """Computes Likelihood of temporal batched adjeciency matrix
 
         Args:
@@ -555,17 +560,21 @@ class VRNNGATWeighted(m.Model):
         Returns:
             tf.Tensor: (B,T)  
         """
-        B = tf.cast(tf.shape(true_adj)[0], tf.float32)
-        T = tf.cast(true_adj.shape[1], tf.float32)
+        if weighted:
+            B = tf.cast(tf.shape(true_adj)[0], tf.float32)
+            T = tf.cast(true_adj.shape[1], tf.float32)
+            pos = tf.cast(true_adj > 0, tf.float32)
+            pos_sum = tf.reduce_sum(pos)
+            tot = T*B*float(self.nodes) ** 2
+            neg = (tot - pos_sum) # negative edges
+            posw = neg / pos_sum
+            norm = tot / neg
+        else:
+            posw = 1.
+            norm = 1. 
         true_adj = tf.expand_dims(true_adj, -1)
-        pos = tf.cast(true_adj > 0, tf.float32)
-        pos_sum = tf.reduce_sum(pos)
-        tot = T*B*float(self.nodes) ** 2
-        neg = (tot - pos_sum) # negative edges
-        posw = neg / pos_sum
-        norm = tot / neg
-        loss = zero_inflated_likelihood(labels=true_adj, logits=pred_adj, sum_axis=(-1, -2), pos_weight=posw)
-        loss = 1/2  * norm * loss
+        loss = zero_inflated_likelihood(labels=true_adj, logits=pred_adj, sum_axis=None, pos_weight=posw)
+        loss = norm * loss
         return loss
 
     @tf.function
@@ -578,11 +587,19 @@ class VRNNGATWeighted(m.Model):
         sigma_posterior = tf.reshape(sigma_posterior, (B, T, -1))
         distr_prior = MultivariateNormalDiag(mu_prior, sigma_prior)
         distr_posterior = MultivariateNormalDiag(mu_posterior, sigma_posterior)
-        return kl_divergence(distr_posterior, distr_prior)
+        return tf.reduce_mean(kl_divergence(distr_posterior, distr_prior))
 
     @tf.function
     def call(self, inputs, states=None, training=None, mask=None):
-        return self.rnn(inputs)
+        return self.rnn(inputs, training=training)
+    
+    @tf.function
+    def sample(self, inputs=None, logits=None, samples=1):
+        if inputs is not None:
+            *_, logits, _ = self(inputs)
+        elif logits is None:
+            raise ValueError("If inputs is None logits must not be None")
+        return zero_inflated_lognormal(logits).sample(samples)
 
     @tf.function
     def train_step(self, data):
@@ -590,12 +607,11 @@ class VRNNGATWeighted(m.Model):
         with tf.GradientTape() as tape:
             *o, h = self(x, training=True)
             if self.return_attn_coef:
-                mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o[1:]
-            else:
-                mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
-            nll = -self.likelihood(y, adj_dec)
+                o = o[1:]
+            mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
+            nll = self.nlikelihood(y, adj_dec)
             kl = self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
-            loss = tf.reduce_mean(nll + kl)
+            loss = nll + kl * self.kl_weight
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         self.loss_tracker_nll.update_state(nll)

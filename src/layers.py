@@ -38,24 +38,42 @@ class VGRNNCell(l.Layer):
             layer_norm=False,
             initializer="glorot_normal",
             gatv2=True,
+            single_gat=True,
             **kwargs,
     ):
         super().__init__(**kwargs)
-        self.rnn = NestedGRUGATCellSingle(
-            nodes,
-            dropout,
-            recurrent_dropout,
-            attn_heads,
-            channels,
-            concat_heads,
-            add_bias,
-            activation,
-            regularizer,
-            return_attn_coef,
-            layer_norm,
-            initializer,
-            gatv2,
-        )
+        if single_gat:
+            self.rnn = NestedGRUGATCellSingle(
+                nodes,
+                dropout,
+                recurrent_dropout,
+                attn_heads,
+                channels,
+                concat_heads,
+                add_bias,
+                activation,
+                regularizer,
+                return_attn_coef,
+                layer_norm,
+                initializer,
+                gatv2,
+            )
+        else:
+            self.rnn = NestedGRUGATCell(
+                nodes,
+                dropout,
+                recurrent_dropout,
+                attn_heads,
+                channels,
+                concat_heads,
+                add_bias,
+                activation,
+                regularizer,
+                return_attn_coef,
+                layer_norm,
+                initializer,
+                gatv2,
+            )
         self.phi_prior = l.Dense(channels * 2, "linear")
         self.phi_x = l.Dense(channels, activation)
         self.phi_z = l.Dense(channels, activation)
@@ -88,7 +106,7 @@ class VGRNNCell(l.Layer):
                 tf.TensorShape((nodes, nodes, outputs)),  # adj dec
             ]
 
-    def call(self, inputs, states, *args, **kwargs):
+    def call(self, inputs, states, training, **kwargs):
         x, a = inputs
         h = states
         p_prior = self.phi_prior(h[0])
@@ -100,12 +118,13 @@ class VGRNNCell(l.Layer):
         post_t_mu = self.mu_enc([enc_t, a])
         post_t_ss = self.sigma_enc([enc_t, a])
         post_t_ss = 1e-3 + tf.math.softplus(0.05 * post_t_ss)
+
         z_distr_post = MultivariateNormalDiag(post_t_mu, post_t_ss)
         z_sample = tf.squeeze(z_distr_post.sample(1), 0)
         phi_z_t = self.phi_z(z_sample)
         adj_dec = self.decoder(z_sample)
 
-        o, h_prime = self.rnn((tf.concat([phi_x_t, phi_z_t], axis=-1), a), h)
+        o, h_prime = self.rnn((tf.concat([phi_x_t, phi_z_t], axis=-1), a), h, training=training)
         if self.return_attn_coef:
             return [
                 o[0],
