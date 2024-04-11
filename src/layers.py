@@ -22,24 +22,24 @@ regu = tf.keras.regularizers
 
 class VGRNNCell(l.Layer):
     def __init__(
-            self,
-            nodes,
-            outputs=1,
-            dropout=0.1,
-            recurrent_dropout=0.1,
-            attn_heads=4,
-            channels=10,
-            concat_heads=False,
-            add_bias=True,
-            diagonal=True,
-            activation="elu",
-            regularizer=None,
-            return_attn_coef=False,
-            layer_norm=False,
-            initializer="glorot_normal",
-            gatv2=True,
-            single_gat=True,
-            **kwargs,
+        self,
+        nodes,
+        outputs=1,
+        dropout=0.1,
+        recurrent_dropout=0.1,
+        attn_heads=4,
+        channels=10,
+        concat_heads=False,
+        add_bias=True,
+        diagonal=False,
+        activation="elu",
+        regularizer=None,
+        return_attn_coef=False,
+        layer_norm=False,
+        initializer="glorot_normal",
+        gatv2=True,
+        single_gat=True,
+        **kwargs,
     ):
         super().__init__(**kwargs)
         if single_gat:
@@ -74,15 +74,39 @@ class VGRNNCell(l.Layer):
                 initializer,
                 gatv2,
             )
-        self.phi_prior = l.Dense(channels * 2, "linear")
-        self.phi_x = l.Dense(channels, activation)
-        self.phi_z = l.Dense(channels, activation)
-        self.enc = GATv2Layer(attn_heads=4, channels=channels, activation=activation)
-        self.mu_enc = GATv2Layer(attn_heads=4, channels=channels, activation=activation)
-        self.sigma_enc = GATv2Layer(
-            attn_heads=4, channels=channels, activation=activation
+        self.phi_prior = tf.keras.Sequential(
+            [
+                l.Dense(channels, activation),
+                l.Dense(channels, activation),
+                l.Dense(channels * 2, "linear"),
+            ]
         )
-        self.decoder = BatchMultiBilinearDecoderDense(activation="linear", diagonal=diagonal, depth=outputs)
+        self.phi_x = tf.keras.Sequential(
+            [
+                l.Dense(channels, activation),
+                l.Dense(channels, activation),
+                l.Dense(channels, activation),
+            ]
+        )
+        self.phi_z = tf.keras.Sequential(
+            [
+                l.Dense(channels, activation),
+                l.Dense(channels, activation),
+                l.Dense(channels, activation),
+            ]
+        )
+        self.enc = GATv2Layer(
+            attn_heads=attn_heads, channels=channels, activation=activation
+        )
+        self.mu_enc = GATv2Layer(
+            attn_heads=attn_heads, channels=channels, activation=activation
+        )
+        self.sigma_enc = GATv2Layer(
+            attn_heads=attn_heads, channels=channels, activation=activation
+        )
+        self.decoder = BatchMultiBilinearDecoderDense(
+            activation="linear", diagonal=diagonal, depth=outputs
+        )
         self.state_size = tf.TensorShape((nodes, channels))
         self.return_attn_coef = return_attn_coef
 
@@ -124,7 +148,9 @@ class VGRNNCell(l.Layer):
         phi_z_t = self.phi_z(z_sample)
         adj_dec = self.decoder(z_sample)
 
-        o, h_prime = self.rnn((tf.concat([phi_x_t, phi_z_t], axis=-1), a), h, training=training)
+        o, h_prime = self.rnn(
+            (tf.concat([phi_x_t, phi_z_t], axis=-1), a), h, training=training
+        )
         if self.return_attn_coef:
             return [
                 o[0],
@@ -151,21 +177,21 @@ class NestedGRUGATCell(
     DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLayer
 ):
     def __init__(
-            self,
-            nodes,
-            dropout,
-            recurrent_dropout,
-            attn_heads,
-            channels,
-            concat_heads=False,
-            add_bias=True,
-            activation="relu",
-            regularizer=None,
-            return_attn_coef=False,
-            layer_norm=False,
-            initializer=init.glorot_normal,
-            gatv2=True,
-            **kwargs,
+        self,
+        nodes,
+        dropout,
+        recurrent_dropout,
+        attn_heads,
+        channels,
+        concat_heads=False,
+        add_bias=True,
+        activation="relu",
+        regularizer=None,
+        return_attn_coef=False,
+        layer_norm=False,
+        initializer=init.glorot_normal,
+        gatv2=True,
+        **kwargs,
     ):
         super(NestedGRUGATCell, self).__init__(**kwargs)
         self.tot_nodes = nodes
@@ -230,48 +256,28 @@ class NestedGRUGATCell(
         )
 
     def build(self, input_shape):
-        self.b_u = self.add_weight(
-            shape=(self.hidden_size_out,),
-            initializer=init.Zeros,
-            name="b_u",
-            regularizer=self.regularizer,
-            caching_device=self.default_caching_device,
-        )
-        self.b_r = self.add_weight(
-            shape=(self.hidden_size_out,),
-            initializer=init.Zeros,
-            name="b_r",
-            regularizer=self.regularizer,
-            caching_device=self.default_caching_device,
-        )
-        self.b_c = self.add_weight(
-            shape=(self.hidden_size_out,),
-            initializer=init.zeros,
-            name="b_c",
-            regularizer=self.regularizer,
-            caching_device=self.default_caching_device,
-        )
-        self.W_u = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer="he_normal",
-            name="W_u_p",
-            regularizer=self.regularizer,
-            caching_device=self.default_caching_device,
-        )
-        self.W_r = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer="he_normal",
-            name="W_r_p",
-            regularizer=self.regularizer,
-            caching_device=self.default_caching_device,
-        )
-        self.W_c = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer="he_normal",
-            name="W_c_p",
-            regularizer=self.regularizer,
-            caching_device=self.default_caching_device,
-        )
+        if self.add_bias:
+            self.b_u = self.add_weight(
+                shape=(self.hidden_size_out,),
+                initializer=init.Zeros,
+                name="b_u",
+                regularizer=self.regularizer,
+                caching_device=self.default_caching_device,
+            )
+            self.b_r = self.add_weight(
+                shape=(self.hidden_size_out,),
+                initializer=init.Zeros,
+                name="b_r",
+                regularizer=self.regularizer,
+                caching_device=self.default_caching_device,
+            )
+            self.b_c = self.add_weight(
+                shape=(self.hidden_size_out,),
+                initializer=init.zeros,
+                name="b_c",
+                regularizer=self.regularizer,
+                caching_device=self.default_caching_device,
+            )
 
     def call(self, inputs, states, training, *args, **kwargs):
         x, a = tf.nest.flatten(inputs)
@@ -286,20 +292,25 @@ class NestedGRUGATCell(
                 inputs=x, training=training, count=1
             )
             x = x * x_mask
-
+        xh = tf.concat([x, h], -1)
         if self.return_attn_coef:
-            u_gat, u_attn = self.gat_u([tf.concat([x, h], -1), a])
-            r_gat, r_attn = self.gat_r([tf.concat([x, h], -1), a])
+            u_gat, u_attn = self.gat_u([xh, a])
+            r_gat, r_attn = self.gat_r([xh, a])
         else:
-            u_gat = self.gat_u([tf.concat([x, h], -1), a])
-            r_gat = self.gat_r([tf.concat([x, h], -1), a])
-        u = tf.nn.sigmoid(self.b_u + u_gat @ self.W_u)
-        r = tf.nn.sigmoid(self.b_r + r_gat @ self.W_r)
+            u_gat = self.gat_u([xh, a])
+            r_gat = self.gat_r([xh, a])
+        if self.add_bias:
+            u_gat = self.b_u + u_gat 
+            r_gat = self.b_r + r_gat 
+        u = tf.nn.sigmoid(u_gat)
+        r = tf.nn.sigmoid(r_gat)
         if self.return_attn_coef:
             c_gat, c_attn = self.gat_c([tf.concat([x, r * h], -1), a])
         else:
             c_gat = self.gat_c([tf.concat([x, r * h], -1), a])
-        c = tf.nn.tanh(self.b_c + c_gat @ self.W_c)
+        if self.add_bias:
+           c_gat = self.b_c + c_gat
+        c = tf.nn.tanh(c_gat)
         h_prime = u * h + (1 - u) * c
         if self.layer_norm:
             h_prime = self.ln(h_prime)
@@ -330,21 +341,21 @@ class NestedGRUGATCellSingle(
     DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLayer
 ):
     def __init__(
-            self,
-            nodes: int,
-            dropout: float,
-            recurrent_dropout: float,
-            attn_heads: int,
-            channels: int,
-            concat_heads=False,
-            add_bias=True,
-            activation="relu",
-            regularizer=None,
-            return_attn_coef=False,
-            layer_norm=False,
-            initializer="glorot_normal",
-            gatv2: bool = True,
-            **kwargs,
+        self,
+        nodes: int,
+        dropout: float,
+        recurrent_dropout: float,
+        attn_heads: int,
+        channels: int,
+        concat_heads=False,
+        add_bias=True,
+        activation="relu",
+        regularizer=None,
+        return_attn_coef=False,
+        layer_norm=False,
+        initializer="glorot_normal",
+        gatv2: bool = True,
+        **kwargs,
     ):
         super(NestedGRUGATCellSingle, self).__init__(**kwargs)
         self.tot_nodes = nodes
@@ -496,18 +507,18 @@ class NestedGRUGATCellSingle(
 )
 class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
     def __init__(
-            self,
-            nodes,
-            dropout,
-            recurrent_dropout,
-            hidden_size_out,
-            activation,
-            regularizer=None,
-            layer_norm=False,
-            attn_heads=4,
-            concat_heads=False,
-            return_attn_coef=False,
-            **kwargs,
+        self,
+        nodes,
+        dropout,
+        recurrent_dropout,
+        hidden_size_out,
+        activation,
+        regularizer=None,
+        layer_norm=False,
+        attn_heads=4,
+        concat_heads=False,
+        return_attn_coef=False,
+        **kwargs,
     ):
         super(NestedGRUAttentionCell, self).__init__(**kwargs)
         self.tot_nodes = nodes
@@ -608,9 +619,17 @@ class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
                 inputs=x, training=training, count=1
             )
             x = x * x_mask
-        u = tf.nn.sigmoid(self.b_u + self.gat_u([tf.concat([x, h], -1), a]) @ self.W_u)
-        r = tf.nn.sigmoid(self.b_r + self.gat_r([tf.concat([x, h], -1), a]) @ self.W_r)
-        c = tf.nn.tanh(self.b_c + self.gat_c([tf.concat([x, r * h], -1), a]) @ self.W_c)
+        u_gat = self.gat_u([tf.concat([x, h], -1), a])
+        r_gat = self.gat_r([tf.concat([x, h], -1), a])
+        if self.add_bias:
+            u_gat = self.b_u + u_gat
+            r_gat = self.b_r + r_gat 
+        u = tf.nn.sigmoid(u_gat)
+        r = tf.nn.sigmoid(r_gat)
+        c_gat = self.gat_c([tf.concat([x, r * h], -1), a])
+        if self.add_bias:
+            c_gat = self.b_c + c_gat
+        c = tf.nn.tanh(c_gat)
         h_prime = u * h + (1 - u) * c
         if self.layer_norm:
             h_prime = self.ln(h_prime)
@@ -638,7 +657,15 @@ class BatchBilinearDecoderDense(l.Layer):
     outputs: A of shape batch x N x N
     """
 
-    def __init__(self, activation="relu", qr=False, regularizer="l2", diagonal=False, zero_diag=True, **kwargs):
+    def __init__(
+        self,
+        activation="relu",
+        qr=False,
+        regularizer="l2",
+        diagonal=False,
+        zero_diag=True,
+        **kwargs,
+    ):
         super(BatchBilinearDecoderDense, self).__init__(**kwargs)
         self.activation = activation
         self.regularizer = regularizer
@@ -663,7 +690,7 @@ class BatchBilinearDecoderDense(l.Layer):
                 regularizer=self.regularizer,
                 name="bilinear_matrix",
             )
-        self.diag = tf.constant(1. - tf.linalg.diag([tf.ones(x[-2])]))
+        self.diag = tf.constant(1.0 - tf.linalg.diag([tf.ones(x[-2])]))
 
     def call(self, inputs, *args, **kwargs):
         x = inputs
@@ -691,7 +718,15 @@ class BatchMultiBilinearDecoderDense(l.Layer):
     outputs: A of shape batch x N x N
     """
 
-    def __init__(self, activation="relu", depth=2, regularizer="l2", diagonal=False, zero_diag=True, **kwargs):
+    def __init__(
+        self,
+        activation="relu",
+        depth=2,
+        regularizer="l2",
+        diagonal=False,
+        zero_diag=True,
+        **kwargs,
+    ):
         super(BatchMultiBilinearDecoderDense, self).__init__(**kwargs)
         self.activation = activation
         self.regularizer = regularizer
@@ -703,13 +738,16 @@ class BatchMultiBilinearDecoderDense(l.Layer):
         x = input_shape
         if self.diagonal:
             self.R = self.add_weight(
-                shape=(self.depth, x[-1],),
+                shape=(
+                    self.depth,
+                    x[-1],
+                ),
                 initializer="glorot_normal",
                 regularizer=self.regularizer,
                 name="bilinear_matrix",
             )
             self.R = tf.linalg.diag(self.R)
-            self.R = tf.transpose(self.R, perm=(1,2,0))
+            self.R = tf.transpose(self.R, perm=(1, 2, 0))
         else:
             self.R = self.add_weight(
                 shape=(x[-1], x[-1], self.depth),
@@ -717,7 +755,7 @@ class BatchMultiBilinearDecoderDense(l.Layer):
                 regularizer=self.regularizer,
                 name="bilinear_matrix",
             )
-        self.diag = tf.constant(1. - tf.linalg.diag([tf.ones(x[-2])]))[..., None]
+        self.diag = tf.constant(1.0 - tf.linalg.diag([tf.ones(x[-2])]))[..., None]
 
     def call(self, inputs, *args, **kwargs):
         x = inputs
@@ -762,15 +800,15 @@ class BilinearDecoderSparse(l.Layer):
 
 class SelfAttention(l.Layer):
     def __init__(
-            self,
-            channels=10,
-            attn_heads=5,
-            dropout_rate=0.5,
-            activation="relu",
-            concat_heads=False,
-            return_attn=False,
-            renormalize=False,
-            initializer="glorot_normal",
+        self,
+        channels=10,
+        attn_heads=5,
+        dropout_rate=0.5,
+        activation="relu",
+        concat_heads=False,
+        return_attn=False,
+        renormalize=False,
+        initializer="glorot_normal",
     ):
         super(SelfAttention, self).__init__()
         self.channels = channels
@@ -851,18 +889,18 @@ class SelfAttention(l.Layer):
 @tf.keras.utils.register_keras_serializable(package="GNN", name="GATv2Layer")
 class GATv2Layer(l.Layer):
     def __init__(
-            self,
-            attn_heads,
-            channels,
-            concat_heads=False,
-            add_bias=True,
-            activation="relu",
-            dropout_rate=0,
-            residual=False,
-            initializer=init.GlorotNormal(seed=0),
-            regularizer=None,
-            return_attn_coef=False,
-            **kwargs,
+        self,
+        attn_heads,
+        channels,
+        concat_heads=False,
+        add_bias=True,
+        activation="relu",
+        dropout_rate=0,
+        residual=False,
+        initializer=init.GlorotNormal(seed=0),
+        regularizer=None,
+        return_attn_coef=False,
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.heads = attn_heads
@@ -1014,31 +1052,37 @@ class GATv2Layer(l.Layer):
 
 
 class ScaleLogProb(tfd.Distribution):
-    def __init__(self,
-                 distribution: tfd.Distribution,
-                 weight,
-                 validate_args=False,
-                 allow_nan_stats=True,
-                 name=None):
+    def __init__(
+        self,
+        distribution: tfd.Distribution,
+        weight,
+        validate_args=False,
+        allow_nan_stats=True,
+        name=None,
+    ):
         parameters = dict(locals())
         with tf.name_scope(name or distribution.name) as name:
             self._distribution = distribution
             self._weight = tensor_util.convert_nonref_to_tensor(
-                weight, dtype_hint=tf.float32)
+                weight, dtype_hint=tf.float32
+            )
             super().__init__(
                 dtype=distribution.dtype,
                 reparameterization_type=distribution.reparameterization_type,
                 validate_args=validate_args,
                 allow_nan_stats=allow_nan_stats,
                 parameters=parameters,
-                name=name)
+                name=name,
+            )
 
     @classmethod
     def _parameter_properties(cls, dtype, num_classes=None):
         return dict(
             distribution=parameter_properties.BatchedComponentProperties(),
             weight=parameter_properties.ParameterProperties(
-                shape_fn=parameter_properties.SHAPE_FN_NOT_IMPLEMENTED))
+                shape_fn=parameter_properties.SHAPE_FN_NOT_IMPLEMENTED
+            ),
+        )
 
     def _event_shape(self):
         return self.distribution.event_shape

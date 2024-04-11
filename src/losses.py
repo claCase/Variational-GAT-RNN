@@ -36,7 +36,7 @@ def min_cut(A, S, normalize=True):
     return mc + ort
 
 
-def zero_inflated_likelihood(labels: Type[tf.Tensor],
+def zero_inflated_nlikelihood(labels: Type[tf.Tensor],
                              logits: Type[tf.Tensor],
                              mean_axis=(-2, -1),
                              pos_weight=1.,

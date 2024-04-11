@@ -260,11 +260,15 @@ def select_edges(
     return subgraph_edgelist, subgraph_values
 
 
-class KlScheduler(tf.keras.callbacks.Callback):
-    def __init__(self, rate, schedule_type="sigmoid"):
+class Scheduler(tf.keras.callbacks.Callback):
+    def __init__(
+        self, param_name: str, rate: float, initial_value=1e-4, schedule_type="sigmoid"
+    ):
         super().__init__()
         self.rate = rate
         self.schedule_type = schedule_type
+        self.param_name = param_name
+        self.initial_value = initial_value
 
     def linear(self, i):
         max_epoch = self.params["epochs"]
@@ -286,13 +290,17 @@ class KlScheduler(tf.keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         epoch = tf.cast(epoch, tf.float32)
-        if hasattr(self.model, "kl_weight"):
-            self.model.kl_weight = self.get_schedule(self.schedule_type)(epoch)
+        if hasattr(self.model, self.param_name):
+            setattr(
+                self.model,
+                self.param_name,
+                self.get_schedule(self.schedule_type)(epoch),
+            )
         else:
-            raise AttributeError(f"Model does not have kl_weight attribute")
+            raise AttributeError(f"Model does not have {self.param_name} attribute")
 
     def on_train_end(self, logs=None):
-        self.model.kl_weight = 1e-4
+        setattr(self.model, self.param_name, self.initial_value)
 
 """
 import cartopy.crs as ccrs
