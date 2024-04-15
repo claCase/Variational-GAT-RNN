@@ -6,11 +6,12 @@ from tensorflow.python.keras.layers.recurrent import (
     _config_for_enable_caching_device,
     _caching_device,
 )
-from spektral.layers import GATConv
+from spektral.layers import GATConv, GCNConv
 from spektral.layers.ops import unsorted_segment_softmax
 from tensorflow_probability.python.distributions import (
     MultivariateNormalDiag,
 )
+from src.utils import positive_variance
 
 tf.keras.utils.get_custom_objects().clear()
 
@@ -20,6 +21,7 @@ init = tf.keras.initializers
 regu = tf.keras.regularizers
 
 
+@tf.keras.utils.register_keras_serializable("NestedRNN")
 class VGRNNCell(l.Layer):
     def __init__(
         self,
@@ -37,48 +39,37 @@ class VGRNNCell(l.Layer):
         return_attn_coef=False,
         layer_norm=False,
         initializer="glorot_normal",
-        gatv2=True,
-        single_gat=True,
+        gat_type="gatv2",
         **kwargs,
     ):
         super().__init__(**kwargs)
-        if single_gat:
-            self.rnn = NestedGRUGATCellSingle(
-                nodes,
-                dropout,
-                recurrent_dropout,
-                attn_heads,
-                channels,
-                concat_heads,
-                add_bias,
-                activation,
-                regularizer,
-                return_attn_coef,
-                layer_norm,
-                initializer,
-                gatv2,
-            )
-        else:
-            self.rnn = NestedGRUGATCell(
-                nodes,
-                dropout,
-                recurrent_dropout,
-                attn_heads,
-                channels,
-                concat_heads,
-                add_bias,
-                activation,
-                regularizer,
-                return_attn_coef,
-                layer_norm,
-                initializer,
-                gatv2,
-            )
-        self.phi_prior = tf.keras.Sequential(
+        self.rnn = GNNRNNCell(
+            nodes=nodes,
+            dropout=dropout,
+            recurrent_dropout=recurrent_dropout,
+            attn_heads=attn_heads,
+            channels=channels,
+            concat_heads=concat_heads,
+            add_bias=add_bias,
+            activation=activation,
+            regularizer=regularizer,
+            return_attn_coef=return_attn_coef,
+            layer_norm=layer_norm,
+            initializer=initializer,
+            gnn_type=gat_type,
+        )
+        self.phi_prior_mu = tf.keras.Sequential(
             [
                 l.Dense(channels, activation),
                 l.Dense(channels, activation),
-                l.Dense(channels * 2, "linear"),
+                l.Dense(channels, "linear"),
+            ]
+        )
+        self.phi_prior_sigma = tf.keras.Sequential(
+            [
+                l.Dense(channels, activation),
+                l.Dense(channels, activation),
+                l.Dense(channels, "linear"),
             ]
         )
         self.phi_x = tf.keras.Sequential(
@@ -95,15 +86,27 @@ class VGRNNCell(l.Layer):
                 l.Dense(channels, activation),
             ]
         )
-        self.enc = GATv2Layer(
-            attn_heads=attn_heads, channels=channels, activation=activation
-        )
-        self.mu_enc = GATv2Layer(
-            attn_heads=attn_heads, channels=channels, activation=activation
-        )
-        self.sigma_enc = GATv2Layer(
-            attn_heads=attn_heads, channels=channels, activation=activation
-        )
+        if gat_type == "gatv2":
+            gat = GATv2Layer
+            gat_kwargs = dict(
+                attn_heads=attn_heads, channels=channels, use_bias=add_bias
+            )
+        elif gat_type == "gat":
+            gat = GATConv
+            gat_kwargs = dict(
+                attn_heads=attn_heads, channels=channels, use_bias=add_bias
+            )
+        elif gat_type == "gcn":
+            gat = GCNConv
+            gat_kwargs = dict(channels=channels, use_bias=add_bias)
+        else:
+            raise NotImplementedError(
+                f"Gat type {gat_type} not implemented, choose between gat, gatv2, gcn"
+            )
+
+        self.enc = gat(**gat_kwargs, activation=activation)
+        self.mu_enc = gat(**gat_kwargs, activation="linear")
+        self.sigma_enc = gat(**gat_kwargs, activation="linear")
         self.decoder = BatchMultiBilinearDecoderDense(
             activation="linear", diagonal=diagonal, depth=outputs
         )
@@ -133,15 +136,14 @@ class VGRNNCell(l.Layer):
     def call(self, inputs, states, training, **kwargs):
         x, a = inputs
         h = states
-        p_prior = self.phi_prior(h[0])
-        mu_prior, sigma_prior = tf.split(p_prior, 2, -1)
-        sigma_prior = 1e-3 + tf.math.softplus(0.05 * sigma_prior)
+        mu_prior, sigma_prior = self.phi_prior_mu(h[0]), self.phi_prior_sigma(h[0])
+        sigma_prior = positive_variance(sigma_prior)
 
         phi_x_t = self.phi_x(x)
         enc_t = self.enc((tf.concat([phi_x_t, h[0]], axis=-1), a))
         post_t_mu = self.mu_enc([enc_t, a])
         post_t_ss = self.sigma_enc([enc_t, a])
-        post_t_ss = 1e-3 + tf.math.softplus(0.05 * post_t_ss)
+        post_t_ss = positive_variance(post_t_ss)
 
         z_distr_post = MultivariateNormalDiag(post_t_mu, post_t_ss)
         z_sample = tf.squeeze(z_distr_post.sample(1), 0)
@@ -172,10 +174,8 @@ class VGRNNCell(l.Layer):
             ], h_prime
 
 
-@tf.keras.utils.register_keras_serializable("NestedRNN", "NestedGRUGATCell")
-class NestedGRUGATCell(
-    DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLayer
-):
+@tf.keras.utils.register_keras_serializable("GNNRNN", "GNNRNNCell")
+class GNNRNNCell(DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLayer):
     def __init__(
         self,
         nodes,
@@ -184,21 +184,22 @@ class NestedGRUGATCell(
         attn_heads,
         channels,
         concat_heads=False,
-        add_bias=True,
+        add_bias=False,
         activation="relu",
         regularizer=None,
         return_attn_coef=False,
         layer_norm=False,
         initializer=init.glorot_normal,
-        gatv2=True,
+        gnn_type="gat",
+        h_gnn=True,
         **kwargs,
     ):
-        super(NestedGRUGATCell, self).__init__(**kwargs)
+        super(GNNRNNCell, self).__init__(**kwargs)
         self.tot_nodes = nodes
         self.dropout = dropout
         self.recurrent_dropout = recurrent_dropout
         self.attn_heads = attn_heads
-        self.hidden_size_out = channels
+        self.channels = channels
         self.concat_heads = concat_heads
         self.add_bias = add_bias
         self.activation = activation
@@ -206,17 +207,26 @@ class NestedGRUGATCell(
         self.return_attn_coef = return_attn_coef
         self.layer_norm = layer_norm
         self.initializer = initializer
-        self.gatv2 = gatv2
-        self.state_size = tf.TensorShape((self.tot_nodes, self.hidden_size_out))
+        self.gnn_type = gnn_type
+        self.h_gnn = h_gnn 
+        self.state_size = tf.TensorShape((self.tot_nodes, self.channels))
         if return_attn_coef:
-            self.output_size = [
-                tf.TensorShape((self.tot_nodes, self.hidden_size_out)),
-                tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
-                tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
-                tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
-            ]
+            if self.h_gnn:
+                self.output_size = [
+                    tf.TensorShape((self.tot_nodes, self.channels)),
+                    tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
+                    tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
+                    tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
+                    tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
+                ]
+            else:
+                self.output_size = [
+                    tf.TensorShape((self.tot_nodes, self.channels)),
+                    tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
+                    tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
+                ]
         else:
-            self.output_size = tf.TensorShape((self.tot_nodes, self.hidden_size_out))
+            self.output_size = tf.TensorShape((self.tot_nodes, self.channels))
 
         if self.layer_norm:
             self.ln = l.LayerNormalization()
@@ -224,55 +234,98 @@ class NestedGRUGATCell(
             self._enable_caching_device = kwargs.pop("enable_caching_device", True)
         else:
             self._enable_caching_device = kwargs.pop("enable_caching_device", False)
-        if gatv2:
-            gat = GATv2Layer
+
+        if gnn_type == "gatv2":
+            gnn = GATv2Layer
+            gat_kwargs = dict(
+                attn_heads=attn_heads, channels=channels, use_bias=add_bias
+            )
+        elif gnn_type == "gat":
+            gnn = GATConv
+            gat_kwargs = dict(
+                attn_heads=attn_heads, channels=channels, use_bias=add_bias
+            )
+        elif gnn_type == "gcn":
+            gnn = GCNConv
+            gat_kwargs = dict(channels=channels, use_bias=add_bias)
         else:
-            gat = GATConv
+            raise NotImplementedError(
+                f"Gat type {gnn_type} not implemented, choose between gat, gatv2, gcn"
+            )
 
         self.default_caching_device = _caching_device(self)
-        self.gat_u = gat(
-            channels=self.hidden_size_out,
+        self.gat_u_x = gnn(
+            channels=self.channels,
             attn_heads=self.attn_heads,
             concat_heads=concat_heads,
             dropout_rate=0,
-            activation=self.activation,
+            activation="linear",
             return_attn_coef=return_attn_coef,
         )
-        self.gat_r = gat(
-            channels=self.hidden_size_out,
+        self.gat_r_x = gnn(
+            channels=self.channels,
             attn_heads=self.attn_heads,
             concat_heads=concat_heads,
             dropout_rate=0,
-            activation=self.activation,
+            activation="linear",
             return_attn_coef=return_attn_coef,
         )
-        self.gat_c = gat(
-            channels=self.hidden_size_out,
+        self.gat_c_x = gnn(
+            channels=self.channels,
             attn_heads=self.attn_heads,
             concat_heads=concat_heads,
             dropout_rate=0,
-            activation=self.activation,
+            activation="linear",
             return_attn_coef=return_attn_coef,
         )
+        if self.h_gnn:
+            self.gat_u_h = gnn(
+                channels=self.channels,
+                attn_heads=self.attn_heads,
+                concat_heads=concat_heads,
+                dropout_rate=0,
+                activation="linear",
+                return_attn_coef=return_attn_coef,
+            )
+            self.gat_r_h = gnn(
+                channels=self.channels,
+                attn_heads=self.attn_heads,
+                concat_heads=concat_heads,
+                dropout_rate=0,
+                activation="linear",
+                return_attn_coef=return_attn_coef,
+            )
+            self.gat_c_h = gnn(
+                channels=self.channels,
+                attn_heads=self.attn_heads,
+                concat_heads=concat_heads,
+                dropout_rate=0,
+                activation="linear",
+                return_attn_coef=return_attn_coef,
+            )
+        else:
+            self.gat_u_h = l.Dense(self.channels, "linear")
+            self.gat_r_h = l.Dense(self.channels, "linear")
+            self.gat_c_h = l.Dense(self.channels, "linear")
 
     def build(self, input_shape):
         if self.add_bias:
             self.b_u = self.add_weight(
-                shape=(self.hidden_size_out,),
+                shape=(self.channels,),
                 initializer=init.Zeros,
                 name="b_u",
                 regularizer=self.regularizer,
                 caching_device=self.default_caching_device,
             )
             self.b_r = self.add_weight(
-                shape=(self.hidden_size_out,),
+                shape=(self.channels,),
                 initializer=init.Zeros,
                 name="b_r",
                 regularizer=self.regularizer,
                 caching_device=self.default_caching_device,
             )
             self.b_c = self.add_weight(
-                shape=(self.hidden_size_out,),
+                shape=(self.channels,),
                 initializer=init.zeros,
                 name="b_c",
                 regularizer=self.regularizer,
@@ -294,187 +347,49 @@ class NestedGRUGATCell(
             x = x * x_mask
         xh = tf.concat([x, h], -1)
         if self.return_attn_coef:
-            u_gat, u_attn = self.gat_u([xh, a])
-            r_gat, r_attn = self.gat_r([xh, a])
+            u_gat_x, u_attn_x = self.gat_u_x([x, a])
+            r_gat_x, r_attn_x = self.gat_r_x([x, a])
+            if self.h_gnn:
+                u_gat_h, u_attn_h = self.gat_u_h([h, a])
+                r_gat_h, r_attn_h = self.gat_r_h([h, a])
+            else:
+                u_gat_h = self.gat_u_h(h)
+                r_gat_h = self.gat_r_h(h)
         else:
-            u_gat = self.gat_u([xh, a])
-            r_gat = self.gat_r([xh, a])
+            u_gat_x = self.gat_u_x([x, a])
+            r_gat_x = self.gat_r_x([x, a])
+            if self.h_gnn:
+                u_gat_h = self.gat_u_h([h, a])
+                r_gat_h = self.gat_r_h([h, a])
+            else:
+                u_gat_h = self.gat_u_h(h)
+                r_gat_h = self.gat_r_h(h)
+
         if self.add_bias:
-            u_gat = self.b_u + u_gat 
-            r_gat = self.b_r + r_gat 
-        u = tf.nn.sigmoid(u_gat)
-        r = tf.nn.sigmoid(r_gat)
-        if self.return_attn_coef:
-            c_gat, c_attn = self.gat_c([tf.concat([x, r * h], -1), a])
+            u = tf.nn.sigmoid(u_gat_x + u_gat_h + self.b_u)
+            r = tf.nn.sigmoid(r_gat_x + r_gat_h + self.b_r)
         else:
-            c_gat = self.gat_c([tf.concat([x, r * h], -1), a])
+            u = tf.nn.sigmoid(u_gat_x + u_gat_h)
+            r = tf.nn.sigmoid(r_gat_x + r_gat_h)
+
+        c_ = self.gat_c_x([x, a])
+        if self.h_gnn:
+            c_ = c_ + self.gat_c_h([r * h, a])
+        else:
+            c_ = c_ + self.gat_c_h(r * h)
         if self.add_bias:
-           c_gat = self.b_c + c_gat
-        c = tf.nn.tanh(c_gat)
+            c_ = c_ + self.b_c
+
+        c = tf.nn.tanh(c_)
         h_prime = u * h + (1 - u) * c
+
         if self.layer_norm:
             h_prime = self.ln(h_prime)
         if self.return_attn_coef:
-            return (h_prime, u_attn, r_attn, c_attn), h_prime
-        else:
-            return h_prime, h_prime
-
-    def get_config(self):
-        config = {
-            "tot_nodes": self.tot_nodes,
-            "hidden_size_out": self.hidden_size_out,
-            "dropout": self.dropout,
-            "recurrent_dropout": self.recurrent_dropout,
-            "regularizer": self.regularizer,
-            "layer_norm": self.layer_norm,
-            "return_attn_coef": self.return_attn_coef,
-        }
-        config.update(_config_for_enable_caching_device(self))
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-@tf.keras.utils.register_keras_serializable(
-    package="NestedRNN", name="NestedGRUGATCellSingle"
-)
-class NestedGRUGATCellSingle(
-    DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLayer
-):
-    def __init__(
-        self,
-        nodes: int,
-        dropout: float,
-        recurrent_dropout: float,
-        attn_heads: int,
-        channels: int,
-        concat_heads=False,
-        add_bias=True,
-        activation="relu",
-        regularizer=None,
-        return_attn_coef=False,
-        layer_norm=False,
-        initializer="glorot_normal",
-        gatv2: bool = True,
-        **kwargs,
-    ):
-        super(NestedGRUGATCellSingle, self).__init__(**kwargs)
-        self.tot_nodes = nodes
-        self.dropout = dropout
-        self.recurrent_dropout = recurrent_dropout
-        self.attn_heads = attn_heads
-        self.hidden_size_out = channels
-        self.concat_heads = concat_heads
-        self.add_bias = add_bias
-        self.activation = activation
-        self.regularizer = regularizer
-        self.return_attn_coef = return_attn_coef
-        self.layer_norm = layer_norm
-        self.initializer = initializer
-        self.gatv2 = gatv2
-        self.state_size = tf.TensorShape((self.tot_nodes, self.hidden_size_out))
-
-        if return_attn_coef:
-            self.output_size = [
-                tf.TensorShape((self.tot_nodes, self.hidden_size_out)),
-                tf.TensorShape((attn_heads, self.tot_nodes, self.tot_nodes)),
-            ]
-        else:
-            self.output_size = tf.TensorShape((self.tot_nodes, self.hidden_size_out))
-
-        if self.layer_norm:
-            self.ln = l.LayerNormalization()
-        if tf.compat.v1.executing_eagerly_outside_functions():
-            self._enable_caching_device = kwargs.pop("enable_caching_device", True)
-        else:
-            self._enable_caching_device = kwargs.pop("enable_caching_device", False)
-        if gatv2:
-            gat = GATv2Layer
-        else:
-            gat = GATConv
-        self.gnn = gat(
-            channels=self.hidden_size_out,
-            attn_heads=self.attn_heads,
-            concat_heads=self.concat_heads,
-            dropout_rate=0,
-            activation=self.activation,
-            return_attn_coef=self.return_attn_coef,
-        )
-
-    def build(self, input_shape):
-        x, a = input_shape
-        default_caching_device = _caching_device(self)
-        self.b_u = self.add_weight(
-            shape=(self.hidden_size_out,),
-            initializer=init.Zeros,
-            name="b_u",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-        self.b_r = self.add_weight(
-            shape=(self.hidden_size_out,),
-            initializer=init.Zeros,
-            name="b_r",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-        self.b_c = self.add_weight(
-            shape=(self.hidden_size_out,),
-            initializer=init.zeros,
-            name="b_c",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-        self.W_u = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer=init.get(self.initializer),
-            name="W_u_p",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-        self.W_r = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer=init.get(self.initializer),
-            name="W_r_p",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-        self.W_c = self.add_weight(
-            shape=(self.hidden_size_out + x[-1], self.hidden_size_out),
-            initializer=init.get(self.initializer),
-            name="W_c_p",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-
-    def call(self, inputs, states, training, *args, **kwargs):
-        x, a = tf.nest.flatten(inputs)
-        h = states[0]
-        if 0 < self.recurrent_dropout < 1:
-            h_mask = self.get_recurrent_dropout_mask_for_cell(
-                inputs=h, training=training, count=1
-            )
-            h = h * h_mask
-
-        if self.return_attn_coef:
-            x_gat, attn = self.gnn([tf.concat([x, h], -1), a])
-        else:
-            x_gat = self.gnn([tf.concat([x, h], -1), a])
-
-        if 0 < self.dropout < 1:
-            x_mask = self.get_dropout_mask_for_cell(
-                inputs=x_gat, training=training, count=1
-            )
-            x_gat = x_gat * x_mask
-
-        u = tf.nn.sigmoid(self.b_u + x_gat @ self.W_u)
-        r = tf.nn.sigmoid(self.b_r + x_gat @ self.W_r)
-        c = tf.concat([x, r * h], -1)
-        c = tf.nn.tanh(self.b_c + c @ self.W_c)
-        h_prime = u * h + (1 - u) * c
-        if self.layer_norm:
-            h_prime = self.ln(h_prime)
-        if self.return_attn_coef:
-            return (h_prime, attn), h_prime
+            if self.h_gnn:
+                return (h_prime, u_attn_x, r_attn_x, u_attn_h, r_attn_h), h_prime
+            else:
+                return (h_prime, u_attn_x, r_attn_x), h_prime
         else:
             return h_prime, h_prime
 
@@ -484,26 +399,27 @@ class NestedGRUGATCellSingle(
             "dropout": self.dropout,
             "recurrent_dropout": self.recurrent_dropout,
             "attn_heads": self.attn_heads,
-            "channels": self.hidden_size_out,
+            "channels": self.channels,
             "concat_heads": self.concat_heads,
             "add_bias": self.add_bias,
             "activation": self.activation,
             "regularizer": self.regularizer,
             "return_attn_coef": self.return_attn_coef,
             "layer_norm": self.layer_norm,
-            "initializer": self.initializer,
-            "gatv2": self.gatv2,
+            "initializer": (
+                self.initializer
+                if type(self.initializer) is str
+                else tf.keras.utils.serialize_keras_object(self.initializer)
+            ),
+            "gnn_type": self.gnn_type,
         }
         config.update(_config_for_enable_caching_device(self))
         base_config = super().get_config()
         return dict(list(base_config.items()) + list(config.items()))
 
-    def from_config(cls, config):
-        return cls(**config)
-
 
 @tf.keras.utils.register_keras_serializable(
-    package="NestedRNN", name="NestedGRUAttentionCell"
+   "GNNRNN", "AttentionRNNCell"
 )
 class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
     def __init__(
@@ -584,27 +500,6 @@ class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
             regularizer=self.regularizer,
             caching_device=default_caching_device,
         )
-        self.W_u = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer="he_normal",
-            name="W_u_p",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-        self.W_r = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer="he_normal",
-            name="W_r_p",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
-        self.W_c = self.add_weight(
-            shape=(self.hidden_size_out, self.hidden_size_out),
-            initializer="he_normal",
-            name="W_c_p",
-            regularizer=self.regularizer,
-            caching_device=default_caching_device,
-        )
 
     def call(self, inputs, states, training, *args, **kwargs):
         x, a = tf.nest.flatten(inputs)
@@ -619,14 +514,14 @@ class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
                 inputs=x, training=training, count=1
             )
             x = x * x_mask
-        u_gat = self.gat_u([tf.concat([x, h], -1), a])
-        r_gat = self.gat_r([tf.concat([x, h], -1), a])
+        u_gat = self.gat_u(tf.concat([x, h], -1), a)
+        r_gat = self.gat_r(tf.concat([x, h], -1), a)
         if self.add_bias:
             u_gat = self.b_u + u_gat
-            r_gat = self.b_r + r_gat 
+            r_gat = self.b_r + r_gat
         u = tf.nn.sigmoid(u_gat)
         r = tf.nn.sigmoid(r_gat)
-        c_gat = self.gat_c([tf.concat([x, r * h], -1), a])
+        c_gat = self.gat_c(tf.concat([x, r * h], -1), a)
         if self.add_bias:
             c_gat = self.b_c + c_gat
         c = tf.nn.tanh(c_gat)
@@ -649,73 +544,11 @@ class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
-class BatchBilinearDecoderDense(l.Layer):
-    """
-    inputs:
-        - X of shape batch x N x d
-        - A of shape batch x N x N
-    outputs: A of shape batch x N x N
-    """
-
-    def __init__(
-        self,
-        activation="relu",
-        qr=False,
-        regularizer="l2",
-        diagonal=False,
-        zero_diag=True,
-        **kwargs,
-    ):
-        super(BatchBilinearDecoderDense, self).__init__(**kwargs)
-        self.activation = activation
-        self.regularizer = regularizer
-        self.qr = qr
-        self.zero_diag = zero_diag
-        self.diagonal = diagonal
-
-    def build(self, input_shape):
-        x = input_shape
-        if self.diagonal:
-            self.R = self.add_weight(
-                shape=(x[-1],),
-                initializer="glorot_normal",
-                regularizer=self.regularizer,
-                name="bilinear_matrix",
-            )
-            self.R = tf.linalg.diag(self.R)
-        else:
-            self.R = self.add_weight(
-                shape=(x[-1], x[-1]),
-                initializer="glorot_normal",
-                regularizer=self.regularizer,
-                name="bilinear_matrix",
-            )
-        self.diag = tf.constant(1.0 - tf.linalg.diag([tf.ones(x[-2])]))
-
-    def call(self, inputs, *args, **kwargs):
-        x = inputs
-        if self.qr:
-            Q, W = tf.linalg.qr(x, full_matrices=False)
-            W_t = tf.einsum("...jk->...kj", W)
-            Q_t = tf.einsum("...jk->...kj", Q)
-            Z = tf.matmul(tf.matmul(W, self.R), W_t)
-            A = tf.matmul(tf.matmul(Q, Z), Q_t)
-            A = act.get(self.activation)(A)
-        else:
-            x_t = tf.einsum("...jk->...kj", x)
-            mat_left = tf.matmul(x, self.R)
-            A = act.get(self.activation)(tf.matmul(mat_left, x_t))
-        if self.zero_diag:
-            return A * self.diag
-        return A
-
-
 class BatchMultiBilinearDecoderDense(l.Layer):
     """
     inputs:
         - X of shape batch x N x d
-        - A of shape batch x N x N
-    outputs: A of shape batch x N x N
+    outputs: A of shape batch x N x N x R
     """
 
     def __init__(
@@ -724,14 +557,16 @@ class BatchMultiBilinearDecoderDense(l.Layer):
         depth=2,
         regularizer="l2",
         diagonal=False,
-        zero_diag=True,
+        mask_diag=True,
+        mask_diag_val=-1e8,
         **kwargs,
     ):
         super(BatchMultiBilinearDecoderDense, self).__init__(**kwargs)
         self.activation = activation
         self.regularizer = regularizer
         self.depth = depth
-        self.zero_diag = zero_diag
+        self.mask_diag = mask_diag
+        self.mask_diag_val = mask_diag_val
         self.diagonal = diagonal
 
     def build(self, input_shape):
@@ -755,14 +590,16 @@ class BatchMultiBilinearDecoderDense(l.Layer):
                 regularizer=self.regularizer,
                 name="bilinear_matrix",
             )
-        self.diag = tf.constant(1.0 - tf.linalg.diag([tf.ones(x[-2])]))[..., None]
+        self.diag = tf.constant(tf.linalg.diag([tf.ones(x[-2])]) * self.mask_diag_val)[
+            ..., None
+        ]
 
     def call(self, inputs, *args, **kwargs):
         x = inputs
         A = tf.einsum("...Bd,dor,...Po->...BPr", x, self.R, x)
+        if self.mask_diag:
+            return A + self.diag
         A = act.get(self.activation)(A)
-        if self.zero_diag:
-            return A * self.diag
         return A
 
 
@@ -806,7 +643,7 @@ class SelfAttention(l.Layer):
         dropout_rate=0.5,
         activation="relu",
         concat_heads=False,
-        return_attn=False,
+        return_attn_coef=False,
         renormalize=False,
         initializer="glorot_normal",
     ):
@@ -816,7 +653,7 @@ class SelfAttention(l.Layer):
         self.dropout_rate = dropout_rate
         self.activation = activation
         self.concat_heads = concat_heads
-        self.return_attn = return_attn
+        self.return_attn_coef = return_attn_coef
         self.renormalize = renormalize
         self.initializer = init.get(initializer)
 
@@ -881,7 +718,7 @@ class SelfAttention(l.Layer):
         else:
             x_prime = tf.reduce_mean(x_prime, axis=1)
             x_prime = tf.squeeze(x_prime)  # NxTxO
-        if self.return_attn:
+        if self.return_attn_coef:
             return x_prime, soft_qk
         return x_prime
 

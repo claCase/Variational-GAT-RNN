@@ -6,9 +6,8 @@ from tensorflow_probability.python.distributions import (
 )
 import tensorflow as tf
 from .layers import (
-    NestedGRUGATCell,
+    GNNRNNCell,
     NestedGRUAttentionCell,
-    NestedGRUGATCellSingle,
     GATv2Layer,
     VGRNNCell,
 )
@@ -22,105 +21,6 @@ m = tf.keras.models
 l = tf.keras.layers
 act = tf.keras.activations
 init = tf.keras.initializers
-
-
-def build_RNNGAT(
-    nodes,
-    input_features,
-    dropout=0.01,
-    activation="relu",
-    recurrent_dropout=0.01,
-    regularizer=None,
-    layer_norm=False,
-    gatv2=True,
-    concat_heads=False,
-    return_attn_coef=False,
-    attn_heads=4,
-    channels=15,
-    stateful=True,
-    return_sequences=True,
-    return_state=True,
-    add_bias=True,
-    units=1,
-    output_activation="tanh",
-    single=True,
-    initializer="glorot_normal",
-):
-    i1 = tf.keras.Input(shape=(None, nodes, input_features), batch_size=1)
-    i2 = tf.keras.Input(shape=(None, nodes, nodes), batch_size=1)
-    if single:
-        cell = NestedGRUGATCellSingle(
-            nodes,
-            dropout=dropout,
-            recurrent_dropout=recurrent_dropout,
-            attn_heads=attn_heads,
-            channels=channels,
-            concat_heads=concat_heads,
-            add_bias=add_bias,
-            activation=activation,
-            regularizer=regularizer,
-            return_attn_coef=return_attn_coef,
-            layer_norm=layer_norm,
-            initializer=initializer,
-            gatv2=gatv2,
-        )
-    else:
-        cell = NestedGRUGATCell(
-            nodes,
-            dropout=dropout,
-            recurrent_dropout=recurrent_dropout,
-            attn_heads=attn_heads,
-            channels=channels,
-            concat_heads=concat_heads,
-            add_bias=add_bias,
-            activation=activation,
-            regularizer=regularizer,
-            return_attn_coef=return_attn_coef,
-            layer_norm=layer_norm,
-            initializer=initializer,
-            gatv2=gatv2,
-        )
-
-    rnn = l.RNN(
-        cell,
-        stateful=stateful,
-        return_sequences=return_sequences,
-        return_state=return_state,
-        time_major=False,
-    )
-    pred_layer = l.Dense(units=units, activation=output_activation)
-    o, h = rnn((i1, i2))
-    if return_attn_coef:
-        p = pred_layer(o[0])
-    else:
-        p = pred_layer(o)
-    model = tf.keras.models.Model([i1, i2], [o, p])
-    return model
-
-
-def build_RNNAttention(
-    nodes,
-    input_features,
-    kwargs_cell={
-        "dropout": 0.01,
-        "activation": "relu",
-        "recurrent_dropout": 0.01,
-        "hidden_size_out": 15,
-        "regularizer": None,
-        "layer_norm": False,
-    },
-    kwargs_rnn={"stateful": False, "return_sequences": True, "return_state": True},
-    kwargs_out={"activation": "tanh"},
-):
-    i1 = tf.keras.Input(shape=(None, nodes, input_features), batch_size=None)
-    i2 = tf.keras.Input(shape=(None, nodes, nodes), batch_size=None)
-    cell = NestedGRUAttentionCell(nodes, **kwargs_cell)
-    rnn = l.RNN(cell, **kwargs_rnn, time_major=False)
-    pred_layer = l.Dense(1, **kwargs_out)
-    o, h = rnn((i1, i2))
-    p = pred_layer(o)
-    return tf.keras.models.Model([i1, i2], [o, p])
-
 
 class RNNGAT(m.Model):
     def __init__(
@@ -139,8 +39,8 @@ class RNNGAT(m.Model):
         return_attn_coef=False,
         layer_norm=False,
         initializer="glorot_normal",
-        gatv2=True,
-        single_gnn=True,
+        gnn_type="gat",
+        h_gnn=True,
         return_sequences=True,
         return_state=True,
         go_backwards=False,
@@ -164,47 +64,31 @@ class RNNGAT(m.Model):
         self.return_attn_coef = return_attn_coef
         self.layer_norm = layer_norm
         self.initializer = initializer
-        self.gatv2 = gatv2
+        self.gnn_type = gnn_type
+        self.h_gnn = h_gnn
         self.return_sequences = return_sequences
         self.return_state = return_state
         self.go_backwards = go_backwards
         self.stateful = stateful
         self.unroll = unroll
-        self.single_gnn = single_gnn
         self.out_channels = out_channels
 
-        if self.single_gnn:
-            rnn_cell = NestedGRUGATCellSingle(
-                nodes=self.nodes,
-                dropout=self.dropout,
-                recurrent_dropout=self.recurrent_dropout,
-                attn_heads=self.attn_heads,
-                channels=self.channels,
-                concat_heads=self.concat_heads,
-                add_bias=self.add_bias,
-                activation=self.activation,
-                regularizer=self.regularizer,
-                return_attn_coef=self.return_attn_coef,
-                layer_norm=self.layer_norm,
-                initializer=self.initializer,
-                gatv2=self.gatv2,
-            )
-        else:
-            rnn_cell = NestedGRUGATCell(
-                nodes=self.nodes,
-                dropout=self.dropout,
-                recurrent_dropout=self.recurrent_dropout,
-                attn_heads=self.attn_heads,
-                channels=self.channels,
-                concat_heads=self.concat_heads,
-                add_bias=self.add_bias,
-                activation=self.activation,
-                regularizer=self.regularizer,
-                return_attn_coef=self.return_attn_coef,
-                layer_norm=self.layer_norm,
-                initializer=self.initializer,
-                gatv2=self.gatv2,
-            )
+        rnn_cell = GNNRNNCell(
+            nodes=self.nodes,
+            dropout=self.dropout,
+            recurrent_dropout=self.recurrent_dropout,
+            attn_heads=self.attn_heads,
+            channels=self.channels,
+            concat_heads=self.concat_heads,
+            add_bias=self.add_bias,
+            activation=self.activation,
+            regularizer=self.regularizer,
+            return_attn_coef=self.return_attn_coef,
+            layer_norm=self.layer_norm,
+            initializer=self.initializer,
+            gnn_type=self.gnn_type,
+            h_gnn=self.h_gnn,
+        )
 
         self.rnn = l.RNN(
             rnn_cell,
@@ -296,22 +180,22 @@ class VRNNGATBinary(m.Model):
         attn_heads,
         channels,
         concat_heads=False,
-        add_bias=True,
-        diagonal=True,
-        activation="relu",
+        add_bias=False,
+        diagonal=False,
+        activation="elu",
         output_activation="tanh",
         regularizer=None,
         return_attn_coef=False,
         layer_norm=False,
         initializer="glorot_normal",
-        gatv2=True,
+        gat_type="gat",
         single_gat=False,
         return_sequences=True,
         return_state=True,
         go_backwards=False,
         stateful=False,
         unroll=False,
-        adj_pos=False,
+        adj_pos=False, # positive edges re-weighting
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -332,15 +216,13 @@ class VRNNGATBinary(m.Model):
         self.return_attn_coef = return_attn_coef
         self.layer_norm = layer_norm
         self.initializer = initializer
-        self.gatv2 = gatv2
+        self.gat_type = gat_type
         self.return_sequences = return_sequences
         self.return_state = return_state
         self.go_backwards = go_backwards
         self.stateful = stateful
         self.unroll = unroll
         self.single_gat = single_gat
-        self.gnn_post_mu = GATv2Layer(self.attn_heads, self.channels)
-        self.gnn_post_sigma = GATv2Layer(self.attn_heads, self.channels)
         self.adj_pos = adj_pos
         self.kl_weight = 1e-4 
 
@@ -357,7 +239,7 @@ class VRNNGATBinary(m.Model):
             return_attn_coef=self.return_attn_coef,
             layer_norm=self.layer_norm,
             initializer=self.initializer,
-            gatv2=self.gatv2,
+            gat_type=self.gat_type,
             single_gat=self.single_gat,
             outputs=1,
         )
@@ -387,26 +269,28 @@ class VRNNGATBinary(m.Model):
             posw = 1.0
             norm = 1.0
         loss = tf.keras.losses.binary_crossentropy(y_true=true_adj[..., None], y_pred=pred_adj[..., None], from_logits=True)
-        loss = loss * (1 - pos) + loss * pos * posw
-        loss = loss * norm
+        #loss = loss * (1 - pos) + loss * pos * posw
+        #loss = loss * norm
         return - tf.reduce_mean(loss)
 
     @tf.function
     def kl_hidden(self, mu_prior, sigma_prior, mu_posterior, sigma_posterior):
         B = tf.shape(mu_prior)[0]
         T = tf.shape(mu_prior)[1]
-        N = tf.cast(tf.shape(mu_prior)[2], mu_prior.dtype)
-        mu_prior = tf.reshape(mu_prior, (B, T, -1))
-        sigma_prior = tf.reshape(sigma_prior, (B, T, -1))
-        mu_posterior = tf.reshape(mu_posterior, (B, T, -1))
-        sigma_posterior = tf.reshape(sigma_posterior, (B, T, -1))
+        N = tf.shape(mu_prior)[2]
+        # Reshaping to independent gaussians -> (B, T, N, d)
+        shape = (B, T, N, -1)
+        mu_prior = tf.reshape(mu_prior, shape)
+        sigma_prior = tf.reshape(sigma_prior, shape)
+        mu_posterior = tf.reshape(mu_posterior, shape)
+        sigma_posterior = tf.reshape(sigma_posterior, shape)
         distr_prior = MultivariateNormalDiag(mu_prior, sigma_prior)
         distr_posterior = MultivariateNormalDiag(mu_posterior, sigma_posterior)
-        return tf.reduce_mean(kl_divergence(distr_posterior, distr_prior) / N)
+        return tf.reduce_mean(kl_divergence(distr_posterior, distr_prior))
 
     @tf.function
     def call(self, inputs, states=None, training=None, mask=None):
-        return self.rnn(inputs)
+        return self.rnn(inputs, training=training)
 
     @tf.function
     def train_step(self, data):
@@ -498,8 +382,7 @@ class VRNNGATWeighted(m.Model):
         return_attn_coef=False,
         layer_norm=False,
         initializer="glorot_normal",
-        gatv2=True,
-        single_gat=True,
+        gat_type="gat",
         return_sequences=True,
         return_state=True,
         go_backwards=False,
@@ -526,8 +409,7 @@ class VRNNGATWeighted(m.Model):
         self.return_attn_coef = return_attn_coef
         self.layer_norm = layer_norm
         self.initializer = initializer
-        self.gatv2 = gatv2
-        self.single_gat = single_gat
+        self.gat_type = gat_type
         self.return_sequences = return_sequences
         self.return_state = return_state
         self.go_backwards = go_backwards
@@ -535,8 +417,6 @@ class VRNNGATWeighted(m.Model):
         self.unroll = unroll
         self.distribution = distribution
         self.n_outputs = 2 if distribution == "halfnormal" else 3
-        self.gnn_post_mu = GATv2Layer(self.attn_heads, self.channels)
-        self.gnn_post_sigma = GATv2Layer(self.attn_heads, self.channels)
         self.adj_pos = adj_pos
         self.kl_weight = 1e-4
 
@@ -553,7 +433,7 @@ class VRNNGATWeighted(m.Model):
             return_attn_coef=self.return_attn_coef,
             layer_norm=self.layer_norm,
             initializer=self.initializer,
-            gatv2=self.gatv2,
+            gat_type=self.gat_type,
             single_gat=self.single_gat,
             outputs=self.n_outputs,
         )
