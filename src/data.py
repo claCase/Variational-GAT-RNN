@@ -1,6 +1,5 @@
 # %%
 from typing import List, Dict, Type, Self, Union, Type, Optional
-
 # import teneto
 import numpy as np
 import tensorflow as tf
@@ -36,7 +35,9 @@ class BaciDataLoader:
 
     @property
     def countries(self, iso="code"):
-        return country_code_converter(list(self.country2idx_mapping.keys()), iso)
+        def get_country(iso=iso):
+            return country_code_converter(list(self.country2idx_mapping.keys()), iso) 
+        return get_country
 
     @property
     def products(
@@ -297,7 +298,7 @@ class BaciDataLoader:
             t = self.year2idx_mapping[t]
             i = self.country2idx_mapping[i]
             j = self.country2idx_mapping[j]
-            k = self.product2idx_mapping[k]
+            k = self.product2idx_mapping[str(k)]
             indices_price[idx, :] = np.asarray((t, i, j, k, 0))
             indices_quantity[idx, :] = np.asarray((t, i, j, k, 1))
 
