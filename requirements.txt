@@ -1,0 +1,12 @@
+tensorflow==2.15.0
+numpy==1.26.2
+networkx==3.2.1
+pandas==2.1.4
+tensorflow-probability==0.23.0
+cartopy==0.22.0
+geopy==2.4.1
+plotly==5.20.0
+dash==2.16.1
+tqdm
+pickle
+matplotlib==3.8.2
