@@ -2,6 +2,7 @@ from typing import List, Tuple, Union
 import pandas as pd
 import numpy as np
 import tensorflow as tf
+import tensorflow_probability.python as tfp 
 import tensorflow_probability.python.distributions as tfd
 import networkx as nx
 import os
@@ -10,6 +11,14 @@ import pickle as pkl
 import tensorflow as tf
 import logging 
 
+
+def symmetrize_dense(a):
+    return (a + a.T)/2 + (a - a.T)/2 
+
+def symmetrize_sparse(indices:np.ndarray):
+    swap = np.concatenate([indices[:, 1:], indices[:, 0:1]], -1)
+    indices = np.unique(np.concatenate([swap, indices], 0), axis=0)
+    return indices
 
 def normalize_adj(adj, symmetric=True, power=-0.5, diagonal=False):
     """
@@ -107,9 +116,7 @@ def filter_value(matrix: np.array, value: float, axis=-1):
 
 
 def positive_variance(var):
-    return tf.math.maximum(
-        tf.nn.softplus(var), tf.math.sqrt(tf.keras.backend.epsilon())
-    )
+    return tf.nn.softplus(var) + 1e-4
 
 
 def zero_inflated_lognormal(logits=None, p=None, mu=None, sigma=None):
@@ -301,6 +308,10 @@ class Scheduler(tf.keras.callbacks.Callback):
 
     def on_train_end(self, logs=None):
         setattr(self.model, self.param_name, self.initial_value)
+
+
+def logGamma(alpha, beta, l=1):
+    return tfp.bijectors.Shift(l - 1)(tfp.bijectors.Exp()(tfp.distributions.Gamma(alpha, beta)))
 
 """
 import cartopy.crs as ccrs

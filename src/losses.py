@@ -1,6 +1,6 @@
 from typing import Type
 import tensorflow as tf
-from .utils import normalize_adj, node_degree, positive_variance
+from .utils import normalize_adj, node_degree, positive_variance, logGamma
 from tensorflow_probability.python.distributions import LogNormal, HalfNormal
 
 klo = tf.keras.losses
@@ -36,12 +36,14 @@ def min_cut(A, S, normalize=True):
     return mc + ort
 
 
-def zero_inflated_nlikelihood(labels: Type[tf.Tensor],
-                             logits: Type[tf.Tensor],
-                             mean_axis=(-2, -1),
-                             pos_weight=1.,
-                             smooth=0.0,
-                             distribution="lognormal") -> Type[tf.Tensor]:
+def zero_inflated_nlikelihood(
+    labels: Type[tf.Tensor],
+    logits: Type[tf.Tensor],
+    mean_axis=(-2, -1),
+    pos_weight=1.0,
+    smooth=0.0,
+    distribution="lognormal",
+) -> Type[tf.Tensor]:
     """
     Computes the zero inflated lognormal loss.
     Arguments:
@@ -52,36 +54,60 @@ def zero_inflated_nlikelihood(labels: Type[tf.Tensor],
     :param smooth: label smoothing scalar parameter
     :param distribution: Either Lognormal or Halfnormal
     """
-    if distribution == "lognormal":
-        assert tf.debugging.assert_equal(tf.shape(logits)[-1], 3)
+    if distribution in {"lognormal", "loggamma"}:
+        tf.debugging.assert_equal(tf.shape(logits)[-1], 3)
     elif distribution == "halfnormal":
         assert tf.debugging.assert_equal(tf.shape(logits)[-1], 2)
     else:
-        raise NotImplementedError(f"Distribution {distribution} is not supported, choose from lognormal or halfnormal")
+        raise NotImplementedError(
+            f"Distribution {distribution} is not supported, choose from lognormal or halfnormal"
+        )
     labels = tf.convert_to_tensor(labels, dtype=tf.float32)
     positive = tf.cast(labels > 0, tf.float32)
     logits = tf.convert_to_tensor(logits, dtype=tf.float32)
     logits.shape.assert_is_compatible_with(
-        tf.TensorShape(labels.shape[:-1].as_list() + [3]))
+        tf.TensorShape(labels.shape[:-1].as_list() + [3])
+    )
 
     positive_logits = logits[..., :1]
     positive_logits = tf.nn.sigmoid(positive_logits)
     classification_loss = tf.keras.losses.binary_crossentropy(
-        y_true=positive, y_pred=positive_logits, from_logits=False, axis=-1, label_smoothing=smooth)
+        y_true=positive,
+        y_pred=positive_logits,
+        from_logits=False,
+        axis=-1,
+        label_smoothing=smooth,
+    )
     positive0 = tf.squeeze(positive, -1)
-    classification_loss = classification_loss * (1 - positive0) + positive0 * classification_loss * pos_weight
+    classification_loss = (
+        classification_loss * (1 - positive0)
+        + positive0 * classification_loss * pos_weight
+    )
     classification_loss = tf.reduce_mean(classification_loss, axis=mean_axis)
-    loc = logits[..., 1:2]
+    loc = tf.nn.relu(logits[..., 1:2])
     # loc = tf.math.maximum(tf.nn.relu(loc), tf.math.sqrt(K.epsilon()))
-    safe_labels = positive * labels + (
-            1 - positive) * tf.ones_like(labels)
+    safe_labels = positive * labels + (1 - positive) * tf.ones_like(labels)
     if distribution == "lognormal":
         scale = positive_variance(logits[..., 2:])
         regression_loss = -tf.reduce_mean(
-            tf.squeeze(positive * LogNormal(loc=loc, scale=scale).log_prob(safe_labels), -1),
-            axis=mean_axis)
+            tf.squeeze(
+                positive * LogNormal(loc=loc, scale=scale).log_prob(safe_labels), -1
+            ),
+            axis=mean_axis,
+        )
+    elif distribution == "halfnormal":
+        regression_loss = -tf.reduce_mean(
+            tf.squeeze(positive * HalfNormal(scale=loc).log_prob(safe_labels), -1),
+            axis=mean_axis,
+        )
+    elif distribution == "loggamma":
+        scale = positive_variance(logits[..., 2:])
+        lg = logGamma(loc, scale)
+        regression_loss = tf.reduce_mean(
+            tf.squeeze(positive * lg.log_prob(safe_labels), -1), axis=mean_axis
+        )
     else:
-        regression_loss = -tf.reduce_mean(tf.squeeze(
-            positive * HalfNormal(scale=loc).log_prob(safe_labels), -1),
-            axis=mean_axis)
+        raise NotImplementedError(
+            f"Dsitribution {distribution} is not implemented, choose between lognormal, halfnormal, loggamma"
+        )
     return 0.5 * classification_loss + 0.5 * regression_loss
