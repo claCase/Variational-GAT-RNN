@@ -15,13 +15,12 @@ from .losses import custom_mse, zero_inflated_nlikelihood
 from tensorflow_probability.python.distributions import MultivariateNormalDiag
 from .utils import zero_inflated_lognormal
 
-tf.keras.utils.get_custom_objects().clear()
-
 m = tf.keras.models
 l = tf.keras.layers
 act = tf.keras.activations
 init = tf.keras.initializers
 
+@tf.keras.utils.register_keras_serializable("GNNRNN")
 class RNNGAT(m.Model):
     def __init__(
         self,
@@ -99,24 +98,16 @@ class RNNGAT(m.Model):
             unroll=self.unroll,
             time_major=False,
         )
-        self.pred_out = l.Dense(self.out_channels, self.output_activation)
 
-    def build(self, input_shape):
+    '''def build(self, input_shape):
         x, a = input_shape
-        self.rnn.build((x, a))
-        rnn_out_shape = self.rnn.compute_output_shape((x, a))
-        self.pred_out.build(rnn_out_shape[0])
-
+        self.rnn.build((x, a))'''
+        
     @tf.function
     def call(self, inputs, states=None, training=None, mask=None):
         x, a = inputs
-        o, h = self.rnn((x, a), initial_state=states, training=training)
-        if self.return_attn_coef:
-            p = self.pred_out(o[0])
-        else:
-            p = self.pred_out(o)
-        return o, p
-
+        return self.rnn((x, a), initial_state=states, training=training)
+        
     @tf.function
     def train_step(self, data):
         x, y = data
@@ -144,6 +135,7 @@ class RNNGAT(m.Model):
             "recurrent_dropout": self.recurrent_dropout,
             "attn_heads": self.attn_heads,
             "channels": self.channels,
+            "out_channels": self.out_channels,
             "concat_heads": self.concat_heads,
             "add_bias": self.add_bias,
             "activation": self.activation,
@@ -152,25 +144,19 @@ class RNNGAT(m.Model):
             "return_attn_coef": self.return_attn_coef,
             "layer_norm": self.layer_norm,
             "initializer": self.initializer,
-            "gatv2": self.gatv2,
+            "gnn_type": self.gnn_type,
+            "h_gnn": self.h_gnn,
             "return_sequences": self.return_sequences,
             "return_state": self.return_state,
             "go_backwards": self.go_backwards,
             "stateful": self.stateful,
             "unroll": self.unroll,
-            "time_major": self.time_major,
-            "single_gnn": self.single_gnn,
-            "out_channels": self.out_channels,
         }
         base_config = super().get_config()
         return dict(list(base_config.items()) + list(config.items()))
 
-    def from_config(cls, config, custom_objects=None):
-        if custom_objects.get("loss"):
-            cls.compiled_loss = custom_objects["loss"]
-        return cls(**config)
 
-
+@tf.keras.utils.register_keras_serializable("GNNRNN")
 class VRNNGATBinary(m.Model):
     def __init__(
         self,
@@ -195,7 +181,7 @@ class VRNNGATBinary(m.Model):
         go_backwards=False,
         stateful=False,
         unroll=False,
-        adj_pos=False, # positive edges re-weighting
+        adj_pos=False,  # positive edges re-weighting
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -224,7 +210,7 @@ class VRNNGATBinary(m.Model):
         self.unroll = unroll
         self.single_gat = single_gat
         self.adj_pos = adj_pos
-        self.kl_weight = 1e-4 
+        self.kl_weight = 1e-4
 
         rnn_cell = VGRNNCell(
             nodes=self.nodes,
@@ -240,7 +226,6 @@ class VRNNGATBinary(m.Model):
             layer_norm=self.layer_norm,
             initializer=self.initializer,
             gat_type=self.gat_type,
-            single_gat=self.single_gat,
             outputs=1,
         )
 
@@ -268,10 +253,12 @@ class VRNNGATBinary(m.Model):
         else:
             posw = 1.0
             norm = 1.0
-        loss = tf.keras.losses.binary_crossentropy(y_true=true_adj[..., None], y_pred=pred_adj[..., None], from_logits=True)
-        #loss = loss * (1 - pos) + loss * pos * posw
-        #loss = loss * norm
-        return - tf.reduce_mean(loss)
+        loss = tf.keras.losses.binary_crossentropy(
+            y_true=true_adj[..., None], y_pred=pred_adj[..., None], from_logits=True
+        )
+        # loss = loss * (1 - pos) + loss * pos * posw
+        # loss = loss * norm
+        return -tf.reduce_mean(loss)
 
     @tf.function
     def kl_hidden(self, mu_prior, sigma_prior, mu_posterior, sigma_posterior):
@@ -302,7 +289,7 @@ class VRNNGATBinary(m.Model):
             mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
             adj_dec = tf.squeeze(adj_dec, axis=-1)
             nll = -self.likelihood(y, adj_dec)
-            kl = self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
+            kl = -self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
             loss = nll + kl * self.kl_weight
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
@@ -312,7 +299,7 @@ class VRNNGATBinary(m.Model):
             "nll": self.loss_tracker_nll.result(),
             "kl": self.loss_tracker_kl.result(),
         }
-    
+
     @tf.function
     def test_step(self, data):
         x, y = data
@@ -364,6 +351,7 @@ class VRNNGATBinary(m.Model):
         return cls(**config)
 
 
+@tf.keras.utils.register_keras_serializable("GNNRNN")
 class VRNNGATWeighted(m.Model):
     def __init__(
         self,
@@ -434,7 +422,6 @@ class VRNNGATWeighted(m.Model):
             layer_norm=self.layer_norm,
             initializer=self.initializer,
             gat_type=self.gat_type,
-            single_gat=self.single_gat,
             outputs=self.n_outputs,
         )
 
@@ -482,16 +469,16 @@ class VRNNGATWeighted(m.Model):
     def kl_hidden(self, mu_prior, sigma_prior, mu_posterior, sigma_posterior):
         B = tf.shape(mu_prior)[0]
         T = tf.shape(mu_prior)[1]
-        N = tf.cast(tf.shape(mu_prior)[2], mu_prior.dtype)
-        mu_prior = tf.reshape(mu_prior, (B, T, -1))
-        sigma_prior = tf.reshape(sigma_prior, (B, T, -1))
-        mu_posterior = tf.reshape(mu_posterior, (B, T, -1))
-        sigma_posterior = tf.reshape(sigma_posterior, (B, T, -1))
+        N = tf.shape(mu_prior)[2]
+        # Reshaping to independent gaussians -> (B, T, N, d)
+        shape = (B, T, N, -1)
+        mu_prior = tf.reshape(mu_prior, shape)
+        sigma_prior = tf.reshape(sigma_prior, shape)
+        mu_posterior = tf.reshape(mu_posterior, shape)
+        sigma_posterior = tf.reshape(sigma_posterior, shape)
         distr_prior = MultivariateNormalDiag(mu_prior, sigma_prior)
         distr_posterior = MultivariateNormalDiag(mu_posterior, sigma_posterior)
-        return tf.reduce_mean(
-            tf.reduce_sum(kl_divergence(distr_posterior, distr_prior) / N, 1), 0
-        )
+        return tf.reduce_mean(kl_divergence(distr_posterior, distr_prior))
 
     @tf.function
     def call(self, inputs, states=None, training=None, mask=None):
@@ -514,7 +501,7 @@ class VRNNGATWeighted(m.Model):
                 o = o[1:]
             mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
             nll = self.nlikelihood(y, adj_dec, self.adj_pos)
-            kl = self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
+            kl = -self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
             loss = nll + kl * self.kl_weight
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
