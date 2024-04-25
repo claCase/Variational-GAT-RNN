@@ -13,10 +13,12 @@ from src.utils import (
     country_code_converter,
     country_long_lat,
     slerp,
+    zero_inflated_lognormal, 
+    bernulli
 )
 import os
-import pandas as pd
-
+import pandas as pd 
+from matplotlib.animation import FuncAnimation
 
 def draw_subgraph(
     G: nx.MultiDiGraph,
@@ -295,3 +297,48 @@ def relational_graph_plotter(graph):
     for i in range(graph.shape[0], 1):
         ax[i, 0].imshow(graph[i, :, :], cmap="winter")
     plt.show()
+
+
+def plot_dynamic_lognorma_adj(logits, save_path=None):
+    """Draws animation of adjacency matrix
+
+    Args:
+        logits (tf.Tensor or np.ndarray): shape (T, N, N, 3)
+        save_path (path, optional): Path to save. Defaults to None.
+    """
+    sample = zero_inflated_lognormal(logits).sample(1).numpy().squeeze()
+    N = sample.shape[-1]
+    log_sample = np.where(sample<1, 0, np.log(sample))
+    fig, ax = plt.subplots(2,3, figsize=(15, 15))
+    def anim(t):
+        ax[0,0].axis("off")
+        ax[0,2].axis("off")
+        ax[0,1].imshow(log_sample[t])
+        ax[1,1].set_title(f"t = {t}")
+        ax[1,0].imshow(tf.nn.sigmoid(logits[t,:, :, 0]))
+        ax[1,1].imshow(logits[t,:, :, 1] * (1-tf.eye(N)))
+        ax[1,2].imshow(logits[t,:, :, 2]* (1-tf.eye(N)))
+        fig.tight_layout()
+
+    func = FuncAnimation(fig, anim, logits.shape[1] -1)
+    func.save(os.path.join(save_path, "weighted_animation_parameters.gif"))
+
+
+def plot_dynamic_bernulli_adj(logits, save_path=None):
+    """Draws animation of adjacency matrix
+
+    Args:
+        logits (tf.Tensor or np.ndarray): shape (T, N, N, 3)
+        save_path (path, optional): Path to save. Defaults to None.
+    """
+    sample = bernulli(logits).sample(1).numpy().squeeze()
+    N = sample.shape[-1]
+    fig, ax = plt.subplots(1,2, figsize=(15, 15))
+    def anim(t):
+        ax[0].imshow(sample[t])
+        ax[1].set_title(f"t = {t}")
+        ax[1].imshow(tf.nn.sigmoid(logits[t,:, :, 0]))
+        fig.tight_layout()
+
+    func = FuncAnimation(fig, anim, logits.shape[1] -1)
+    func.save(os.path.join(save_path, "binary_animation_parameters.gif"))
