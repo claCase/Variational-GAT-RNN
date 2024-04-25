@@ -1,0 +1,1 @@
+![animation](https://github.com/claCase/Variational-GAT-RNN/blob/master/figures/weighted_animation_parameters.gif)
