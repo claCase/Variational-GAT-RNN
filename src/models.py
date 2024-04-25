@@ -10,6 +10,7 @@ from .layers import (
     NestedGRUAttentionCell,
     GATv2Layer,
     VGRNNCell,
+    BatchMultiBilinearDecoderDense,
 )
 from .losses import custom_mse, zero_inflated_nlikelihood
 from tensorflow_probability.python.distributions import MultivariateNormalDiag
@@ -20,6 +21,61 @@ l = tf.keras.layers
 act = tf.keras.activations
 init = tf.keras.initializers
 
+
+def build_RNNGAT(distribution, **kwargs):
+    kwargs_ = dict(
+        nodes=171,
+        dropout=0,
+        recurrent_dropout=0,
+        attn_heads=1,
+        channels=35,
+        out_channels=30,
+        activation="gelu",
+        gnn_type="gat",
+        add_bias=True,
+        h_gnn=True,
+    )
+    kwargs_.update(kwargs)
+    if distribution != "bernulli":
+
+        @tf.keras.utils.register_keras_serializable(package="GNNRNN")
+        def lognormal_loss(labels, logits):
+            labels = tf.expand_dims(labels, -1)
+            return zero_inflated_nlikelihood(
+                labels, logits, mean_axis=None, distribution=distribution
+            )
+
+        if distribution == "halfnormal":
+            depth = 2
+        else:
+            depth = 3
+        loss = lognormal_loss
+    else:
+        @tf.keras.utils.register_keras_serializable(package="GNNRNN")
+        def bce(labels, logits):
+            return tf.reduce_mean(
+                tf.keras.losses.binary_crossentropy(
+                    labels[..., None], logits[..., None], from_logits=True
+                )
+            )
+        loss = bce
+        depth = 1
+
+    i1, i2 = tf.keras.Input(shape=(None, 171, 171)), tf.keras.Input(
+        shape=(None, 171, 171)
+    )
+    rnn_gat = RNNGAT(**kwargs_)
+    decoder = BatchMultiBilinearDecoderDense(
+        depth=depth, diagonal=False, mask_diag=True, activation="linear"
+    )
+    xo, xp = rnn_gat((i1, i2))
+    xa = decoder(xo)
+    model = tf.keras.models.Model((i1, i2), (xa))
+    model.compile(optimizer="rmsprop", loss=loss, metrics=loss)
+    return model
+
+
+# logits = model2((x, adj), training=True)
 @tf.keras.utils.register_keras_serializable("GNNRNN")
 class RNNGAT(m.Model):
     def __init__(
@@ -99,15 +155,11 @@ class RNNGAT(m.Model):
             time_major=False,
         )
 
-    '''def build(self, input_shape):
-        x, a = input_shape
-        self.rnn.build((x, a))'''
-        
     @tf.function
     def call(self, inputs, states=None, training=None, mask=None):
         x, a = inputs
         return self.rnn((x, a), initial_state=states, training=training)
-        
+
     @tf.function
     def train_step(self, data):
         x, y = data
@@ -258,7 +310,7 @@ class VRNNGATBinary(m.Model):
         )
         # loss = loss * (1 - pos) + loss * pos * posw
         # loss = loss * norm
-        return -tf.reduce_mean(loss)
+        return -tf.reduce_mean(tf.reduce_sum(tf.reduce_mean(loss, (-1, -2)), 1))
 
     @tf.function
     def kl_hidden(self, mu_prior, sigma_prior, mu_posterior, sigma_posterior):
@@ -273,7 +325,24 @@ class VRNNGATBinary(m.Model):
         sigma_posterior = tf.reshape(sigma_posterior, shape)
         distr_prior = MultivariateNormalDiag(mu_prior, sigma_prior)
         distr_posterior = MultivariateNormalDiag(mu_posterior, sigma_posterior)
-        return tf.reduce_mean(kl_divergence(distr_posterior, distr_prior))
+        return tf.reduce_mean(
+            tf.reduce_sum(
+                tf.reduce_mean(kl_divergence(distr_posterior, distr_prior), -1), 1
+            )
+        )
+    
+    @tf.function
+    def _kld_gauss(self, mean_1, std_1, mean_2, std_2):
+        num_nodes = tf.cast(tf.shape(mean_1)[-2], mean_1.dtype)
+        kld_element = (
+            2 * tf.math.log(std_2)
+            - 2 * tf.math.log(std_1)
+            + (tf.math.pow(std_1, 2) + tf.math.pow(mean_1 - mean_2, 2))
+            / tf.math.pow(std_2, 2)
+            - 1
+        )
+        return tf.reduce_mean(tf.reduce_sum(kld_element, axis=-1)) * (0.5 / num_nodes)
+
 
     @tf.function
     def call(self, inputs, states=None, training=None, mask=None):
@@ -288,8 +357,9 @@ class VRNNGATBinary(m.Model):
                 o = o[1:]
             mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
             adj_dec = tf.squeeze(adj_dec, axis=-1)
-            nll = -self.likelihood(y, adj_dec)
-            kl = -self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
+            nll = - self.likelihood(y, adj_dec)
+            #kl = self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
+            kl = self._kld_gauss(post_t_mu, post_t_sigma, mu_prior, sigma_prior)
             loss = nll + kl * self.kl_weight
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
@@ -309,7 +379,7 @@ class VRNNGATBinary(m.Model):
         else:
             mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
         nll = self.likelihood(y, adj_dec, self.adj_pos)
-        kl = self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
+        kl = self._kld_gauss(post_t_mu, post_t_sigma, mu_prior, sigma_prior)
         return {"nll": nll, "kl": kl}
 
     def sample_adjacency(self, inputs, n_samples=1):
@@ -436,7 +506,7 @@ class VRNNGATWeighted(m.Model):
         )
 
     @tf.function
-    def nlikelihood(self, true_adj, pred_adj, weighted=False):
+    def likelihood(self, true_adj, pred_adj, weighted=False):
         """Computes Likelihood of temporal batched adjeciency matrix
 
         Args:
@@ -463,7 +533,7 @@ class VRNNGATWeighted(m.Model):
             labels=true_adj, logits=pred_adj, mean_axis=None, pos_weight=posw
         )
         loss = norm * loss
-        return loss
+        return -loss
 
     @tf.function
     def kl_hidden(self, mu_prior, sigma_prior, mu_posterior, sigma_posterior):
@@ -478,7 +548,23 @@ class VRNNGATWeighted(m.Model):
         sigma_posterior = tf.reshape(sigma_posterior, shape)
         distr_prior = MultivariateNormalDiag(mu_prior, sigma_prior)
         distr_posterior = MultivariateNormalDiag(mu_posterior, sigma_posterior)
-        return tf.reduce_mean(kl_divergence(distr_posterior, distr_prior))
+        return tf.reduce_mean(
+            tf.reduce_sum(
+                tf.reduce_mean(kl_divergence(distr_posterior, distr_prior), -1), 1
+            )
+        )
+
+    @tf.function
+    def _kld_gauss(self, mean_1, std_1, mean_2, std_2):
+        num_nodes = tf.cast(tf.shape(mean_1)[-2], mean_1.dtype)
+        kld_element = (
+            2 * tf.math.log(std_2)
+            - 2 * tf.math.log(std_1)
+            + (tf.math.pow(std_1, 2) + tf.math.pow(mean_1 - mean_2, 2))
+            / tf.math.pow(std_2, 2)
+            - 1
+        )
+        return tf.reduce_mean(tf.reduce_sum(kld_element, axis=-1)) * (0.5 / num_nodes)
 
     @tf.function
     def call(self, inputs, states=None, training=None, mask=None):
@@ -500,8 +586,8 @@ class VRNNGATWeighted(m.Model):
             if self.return_attn_coef:
                 o = o[1:]
             mu_prior, sigma_prior, post_t_mu, post_t_sigma, h_prime, adj_dec = o
-            nll = self.nlikelihood(y, adj_dec, self.adj_pos)
-            kl = -self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
+            nll = -self.likelihood(y, adj_dec, self.adj_pos)
+            kl = self.kl_hidden(mu_prior, sigma_prior, post_t_mu, post_t_sigma)
             loss = nll + kl * self.kl_weight
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))

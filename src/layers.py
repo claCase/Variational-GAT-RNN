@@ -13,7 +13,6 @@ from tensorflow_probability.python.distributions import (
 )
 from src.utils import positive_variance
 
-tf.keras.utils.get_custom_objects().clear()
 
 l = tf.keras.layers
 act = tf.keras.activations
@@ -39,7 +38,7 @@ class VGRNNCell(l.Layer):
         return_attn_coef=False,
         layer_norm=False,
         initializer="glorot_normal",
-        gat_type="gatv2",
+        gat_type="gat",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -69,7 +68,7 @@ class VGRNNCell(l.Layer):
             [
                 l.Dense(channels, activation),
                 l.Dense(channels, activation),
-                l.Dense(channels, "linear"),
+                l.Dense(channels, lambda x: positive_variance(x)),
             ]
         )
         self.phi_x = tf.keras.Sequential(
@@ -106,7 +105,7 @@ class VGRNNCell(l.Layer):
 
         self.enc = gat(**gat_kwargs, activation=activation)
         self.mu_enc = gat(**gat_kwargs, activation="linear")
-        self.sigma_enc = gat(**gat_kwargs, activation="linear")
+        self.sigma_enc = gat(**gat_kwargs, activation=lambda x: positive_variance(x))
         self.decoder = BatchMultiBilinearDecoderDense(
             activation="linear", diagonal=diagonal, depth=outputs
         )
@@ -137,14 +136,12 @@ class VGRNNCell(l.Layer):
         x, a = inputs
         h = states
         mu_prior, sigma_prior = self.phi_prior_mu(h[0]), self.phi_prior_sigma(h[0])
-        sigma_prior = positive_variance(sigma_prior)
-
+        
         phi_x_t = self.phi_x(x)
         enc_t = self.enc((tf.concat([phi_x_t, h[0]], axis=-1), a))
         post_t_mu = self.mu_enc([enc_t, a])
         post_t_ss = self.sigma_enc([enc_t, a])
-        post_t_ss = positive_variance(post_t_ss)
-
+        
         z_distr_post = MultivariateNormalDiag(post_t_mu, post_t_ss)
         z_sample = tf.squeeze(z_distr_post.sample(1), 0)
         phi_z_t = self.phi_z(z_sample)
@@ -174,7 +171,7 @@ class VGRNNCell(l.Layer):
             ], h_prime
 
 
-@tf.keras.utils.register_keras_serializable("GNNRNN", "GNNRNNCell")
+@tf.keras.utils.register_keras_serializable("GNNRNN")
 class GNNRNNCell(DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLayer):
     def __init__(
         self,
@@ -189,7 +186,7 @@ class GNNRNNCell(DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLay
         regularizer=None,
         return_attn_coef=False,
         layer_norm=False,
-        initializer=init.glorot_normal,
+        initializer="glorot_normal",
         gnn_type="gat",
         h_gnn=True,
         **kwargs,
@@ -208,7 +205,7 @@ class GNNRNNCell(DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLay
         self.layer_norm = layer_norm
         self.initializer = initializer
         self.gnn_type = gnn_type
-        self.h_gnn = h_gnn 
+        self.h_gnn = h_gnn
         self.state_size = tf.TensorShape((self.tot_nodes, self.channels))
         if return_attn_coef:
             if self.h_gnn:
@@ -418,9 +415,7 @@ class GNNRNNCell(DropoutRNNCellMixin, tf.keras.__internal__.layers.BaseRandomLay
         return dict(list(base_config.items()) + list(config.items()))
 
 
-@tf.keras.utils.register_keras_serializable(
-   "GNNRNN", "AttentionRNNCell"
-)
+@tf.keras.utils.register_keras_serializable("GNNRNN", "AttentionRNNCell")
 class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
     def __init__(
         self,
@@ -544,13 +539,13 @@ class NestedGRUAttentionCell(DropoutRNNCellMixin, l.Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
+@tf.keras.utils.register_keras_serializable("GNNRNN")
 class BatchMultiBilinearDecoderDense(l.Layer):
     """
     inputs:
         - X of shape batch x N x d
     outputs: A of shape batch x N x N x R
     """
-
     def __init__(
         self,
         activation="relu",
@@ -590,9 +585,8 @@ class BatchMultiBilinearDecoderDense(l.Layer):
                 regularizer=self.regularizer,
                 name="bilinear_matrix",
             )
-        self.diag = tf.constant(tf.linalg.diag([tf.ones(x[-2])]) * self.mask_diag_val)[
-            ..., None
-        ]
+        self.diag = tf.constant(tf.linalg.diag([tf.ones(x[-2])]) * self.mask_diag_val)
+        self.diag = self.diag[..., None]
 
     def call(self, inputs, *args, **kwargs):
         x = inputs
@@ -601,6 +595,18 @@ class BatchMultiBilinearDecoderDense(l.Layer):
             return A + self.diag
         A = act.get(self.activation)(A)
         return A
+
+    def get_config(self):
+        config = {
+            "activation": self.activation,
+            "depth": self.depth,
+            "regularizer": self.regularizer,
+            "diagonal": self.diagonal,
+            "mask_diag": self.mask_diag,
+            "mask_diag_val": self.mask_diag_val,
+        }
+        base_config = super().get_config()
+        return dict(list(base_config.items()) + list(config.items()))
 
 
 class BilinearDecoderSparse(l.Layer):

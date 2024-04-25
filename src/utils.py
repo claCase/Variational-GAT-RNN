@@ -115,8 +115,9 @@ def filter_value(matrix: np.array, value: float, axis=-1):
     return matrix[filter_], filter_
 
 
-def positive_variance(var):
-    return tf.nn.softplus(var) + 1e-4
+@tf.keras.utils.register_keras_serializable("CustomUtils")
+def positive_variance(var, eps=1e-10):
+    return tf.nn.softplus(var) + eps
 
 
 def zero_inflated_lognormal(logits=None, p=None, mu=None, sigma=None):
@@ -283,7 +284,7 @@ class Scheduler(tf.keras.callbacks.Callback):
 
     def sigmoid(self, i):
         max_epoch = self.params["epochs"]
-        return tf.nn.sigmoid(i / max_epoch * self.rate) * 2 - 0.49
+        return tf.nn.sigmoid(i / max_epoch * self.rate) * 1.5 - 0.49
 
     def get_schedule(self, type):
         if type == "linear":
@@ -312,6 +313,10 @@ class Scheduler(tf.keras.callbacks.Callback):
 
 def logGamma(alpha, beta, l=1):
     return tfp.bijectors.Shift(l - 1)(tfp.bijectors.Exp()(tfp.distributions.Gamma(alpha, beta)))
+
+def bernulli(logits):
+    return tfd.Independent(tfd.Bernoulli(logits=logits), reinterpreted_batch_ndims=2)
+    
 
 """
 import cartopy.crs as ccrs
